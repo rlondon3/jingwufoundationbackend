@@ -1,0 +1,29 @@
+{
+	"name": "jingwufoundationBackend",
+	"version": "1.0.0",
+	"description": "",
+	"main": "src/server.js",
+	"scripts": {
+		"dev": "nodemon src/server.js",
+		"start": "node src/server.js"
+	},
+	"keywords": [],
+	"author": "",
+	"license": "ISC",
+	"dependencies": {
+		"bcryptjs": "^3.0.2",
+		"cors": "^2.8.5",
+		"db-migrate": "^0.11.14",
+		"db-migrate-pg": "^1.5.2",
+		"dotenv": "^16.5.0",
+		"express": "^5.1.0",
+		"helmet": "^8.1.0",
+		"joi": "^17.13.3",
+		"jsonwebtoken": "^9.0.2",
+		"morgan": "^1.10.0",
+		"pg": "^8.16.0"
+	},
+	"devDependencies": {
+		"nodemon": "^3.1.10"
+	}
+}
