@@ -45,7 +45,7 @@ const corsOptions = {
 	allowedHeaders: ['Content-Type', 'Authorization'],
 };
 
-app.options('*', cors(corsOptions));
+// app.options('*', cors(corsOptions));
 
 // Middleware
 app.use(helmet());
@@ -62,9 +62,6 @@ app.get('/', function (req, res) {
 		timestamp: new Date().toISOString(),
 	});
 });
-
-console.log('TOKEN_SECRET loaded:', !!process.env.TOKEN_SECRET);
-console.log('TOKEN_SECRET value:', process.env.TOKEN_SECRET);
 
 // Route handlers
 users_route(app);
