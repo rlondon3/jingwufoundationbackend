@@ -275,10 +275,10 @@ class UserStore {
 					client.release();
 					return res.rows[0];
 				}
+			} else {
+				client.release();
+				return null;
 			}
-
-			client.release();
-			return null;
 		} catch (error) {
 			throw new Error(`Could not authenticate: ${error}`);
 		}
@@ -349,7 +349,6 @@ function handleUserErrors(user) {
 			courses: Joi.string().valid('public', 'private').default('public'),
 		}).optional(),
 	});
-
 	return userSchema.validate(user);
 }
 

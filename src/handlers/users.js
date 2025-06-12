@@ -205,7 +205,6 @@ const users_route = (app) => {
 	 */
 	const authenticate = async (req, res) => {
 		const { username, password } = req.body;
-
 		if (!username || !password) {
 			return res
 				.status(400)
@@ -214,7 +213,6 @@ const users_route = (app) => {
 
 		try {
 			const authUser = await store.authenticate(username, password);
-
 			if (!authUser) {
 				return res.status(401).json({ error: 'Invalid username or password' });
 			}
