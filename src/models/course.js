@@ -345,11 +345,14 @@ class CourseStore {
 		try {
 			const sql = `
         INSERT INTO user_lesson_progress (user_id, lesson_id, completed, completed_at, quiz_score)
-        VALUES ($1, $2, true, CURRENT_TIMESTAMP, $3)
-        ON CONFLICT (user_id, lesson_id) 
-        UPDATE SET completed = true, completed_at = CURRENT_TIMESTAMP, 
-                   quiz_score = $3, updated_at = CURRENT_TIMESTAMP
-        RETURNING *
+			VALUES ($1, $2, true, CURRENT_TIMESTAMP, $3)
+			ON CONFLICT (user_id, lesson_id) 
+			DO UPDATE SET 
+			completed = true, 
+			completed_at = CURRENT_TIMESTAMP, 
+			quiz_score = $3, 
+			updated_at = CURRENT_TIMESTAMP
+			RETURNING *
       `;
 
 			const client = await this.pool.connect();

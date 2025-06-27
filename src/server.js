@@ -5,6 +5,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const users_route = require('./handlers/users');
+const courses_route = require('./handlers/courses');
 const health_route = require('./handlers/health');
 
 const app = express();
@@ -66,6 +67,7 @@ app.get('/', function (req, res) {
 // Route handlers
 users_route(app);
 health_route(app);
+courses_route(app);
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
