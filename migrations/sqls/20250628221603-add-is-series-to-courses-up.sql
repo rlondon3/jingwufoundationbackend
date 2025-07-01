@@ -1,0 +1,2 @@
+ALTER TABLE courses 
+ADD COLUMN is_series BOOLEAN NOT NULL DEFAULT false;

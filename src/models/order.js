@@ -3,7 +3,7 @@ const Joi = require('joi');
 
 /**
  * OrderStore handles all order-related database operations
- * Manages course purchases, order status tracking, and automatic user enrollment
+ * Integrated with Stripe for payment processing
  */
 class OrderStore {
 	constructor(pool) {
@@ -21,10 +21,12 @@ class OrderStore {
 		try {
 			const sql = `
         SELECT o.*, u.name as user_name, u.email as user_email, 
-               c.title as course_title, c.category as course_category
+               c.title as course_title, c.category as course_category,
+               so.checkout_session_id, so.payment_intent_id, so.amount_total as stripe_amount
         FROM orders o
         JOIN users u ON o.user_id = u.id
         JOIN courses c ON o.course_id = c.id
+        LEFT JOIN stripe_orders so ON o.stripe_checkout_session_id = so.checkout_session_id
         ORDER BY o.created_at DESC
       `;
 			const client = await this.pool.connect();
@@ -44,10 +46,13 @@ class OrderStore {
 			const sql = `
         SELECT o.*, u.name as user_name, u.email as user_email,
                c.title as course_title, c.category as course_category,
-               c.instructor_name, c.thumbnail_url
+               c.instructor_name, c.thumbnail_url,
+               so.checkout_session_id, so.payment_intent_id, so.amount_total as stripe_amount,
+               so.payment_status as stripe_payment_status
         FROM orders o
         JOIN users u ON o.user_id = u.id
         JOIN courses c ON o.course_id = c.id
+        LEFT JOIN stripe_orders so ON o.stripe_checkout_session_id = so.checkout_session_id
         WHERE o.id = $1
       `;
 			const client = await this.pool.connect();
@@ -60,9 +65,9 @@ class OrderStore {
 	}
 
 	/**
-	 * Get order by order number
+	 * Get order by Stripe checkout session ID
 	 */
-	async getByOrderNumber(orderNumber) {
+	async getByStripeSession(checkoutSessionId) {
 		try {
 			const sql = `
         SELECT o.*, u.name as user_name, u.email as user_email,
@@ -70,14 +75,14 @@ class OrderStore {
         FROM orders o
         JOIN users u ON o.user_id = u.id
         JOIN courses c ON o.course_id = c.id
-        WHERE o.order_number = $1
+        WHERE o.stripe_checkout_session_id = $1
       `;
 			const client = await this.pool.connect();
-			const res = await client.query(sql, [orderNumber]);
+			const res = await client.query(sql, [checkoutSessionId]);
 			client.release();
 			return res.rows[0];
 		} catch (error) {
-			throw new Error(`Can't find order by number: ${error}`);
+			throw new Error(`Can't find order by Stripe session: ${error}`);
 		}
 	}
 
@@ -115,10 +120,11 @@ class OrderStore {
 				throw new Error('User has already purchased this course');
 			}
 
-			// Create order
+			// Create order with Stripe integration
 			const sql = `
-        INSERT INTO orders (user_id, course_id, course_price, order_status, payment_method, notes)
-        VALUES ($1, $2, $3, $4, $5, $6) RETURNING *
+        INSERT INTO orders (user_id, course_id, course_price, order_status, 
+                           payment_method, stripe_checkout_session_id, notes)
+        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *
       `;
 
 			const res = await client.query(sql, [
@@ -127,6 +133,7 @@ class OrderStore {
 				coursePrice,
 				order.order_status || 'pending',
 				order.payment_method || 'stripe',
+				order.stripe_checkout_session_id || null,
 				order.notes || null,
 			]);
 
@@ -152,10 +159,10 @@ class OrderStore {
           order_status = $1,
           stripe_payment_intent_id = COALESCE($2, stripe_payment_intent_id),
           notes = COALESCE($3, notes),
+          completed_at = CASE WHEN $1 = 'completed' THEN CURRENT_TIMESTAMP ELSE completed_at END,
           updated_at = CURRENT_TIMESTAMP
         WHERE id = $4 RETURNING *
       `;
-
 			const client = await this.pool.connect();
 			const res = await client.query(sql, [
 				status,
@@ -172,6 +179,62 @@ class OrderStore {
 			return res.rows[0];
 		} catch (error) {
 			throw new Error(`Could not update order status: ${error}`);
+		}
+	}
+
+	/**
+	 * Complete order from Stripe webhook
+	 */
+	async completeFromStripe(checkoutSessionId, stripePaymentIntentId = null) {
+		try {
+			const sql = `
+        UPDATE orders SET 
+          order_status = 'completed',
+          stripe_payment_intent_id = COALESCE($2, stripe_payment_intent_id),
+          completed_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP,
+          notes = 'Payment completed via Stripe'
+        WHERE stripe_checkout_session_id = $1 RETURNING *
+      `;
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [
+				checkoutSessionId,
+				stripePaymentIntentId,
+			]);
+			client.release();
+
+			if (res.rows.length === 0) {
+				throw new Error('Order not found for Stripe session');
+			}
+
+			return res.rows[0];
+		} catch (error) {
+			throw new Error(`Could not complete order from Stripe: ${error}`);
+		}
+	}
+
+	/**
+	 * Link existing order to Stripe session
+	 */
+	async linkToStripeSession(orderId, checkoutSessionId) {
+		try {
+			const sql = `
+        UPDATE orders SET 
+          stripe_checkout_session_id = $1,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = $2 RETURNING *
+      `;
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [checkoutSessionId, orderId]);
+			client.release();
+
+			if (res.rows.length === 0) {
+				throw new Error('Order not found');
+			}
+
+			return res.rows[0];
+		} catch (error) {
+			throw new Error(`Could not link order to Stripe: ${error}`);
 		}
 	}
 
@@ -223,9 +286,11 @@ class OrderStore {
 	async getUserOrders(userId) {
 		try {
 			const sql = `
-        SELECT o.*, c.title as course_title, c.thumbnail_url, c.category
+        SELECT o.*, c.title as course_title, c.thumbnail_url, c.category,
+               so.checkout_session_id, so.payment_status as stripe_payment_status
         FROM orders o
         JOIN courses c ON o.course_id = c.id
+        LEFT JOIN stripe_orders so ON o.stripe_checkout_session_id = so.checkout_session_id
         WHERE o.user_id = $1
         ORDER BY o.created_at DESC
       `;
@@ -287,8 +352,14 @@ class OrderStore {
 	async getSuccessfulOrders() {
 		try {
 			const sql = `
-        SELECT * FROM successful_orders
-        ORDER BY completed_at DESC
+        SELECT o.*, c.title as course_title, u.name as user_name,
+               so.amount_total as stripe_amount, so.currency
+        FROM orders o
+        JOIN courses c ON o.course_id = c.id
+        JOIN users u ON o.user_id = u.id
+        LEFT JOIN stripe_orders so ON o.stripe_checkout_session_id = so.checkout_session_id
+        WHERE o.order_status = 'completed'
+        ORDER BY o.completed_at DESC
       `;
 			const client = await this.pool.connect();
 			const res = await client.query(sql);
@@ -387,6 +458,7 @@ function validateOrder(order) {
 			.valid('pending', 'completed', 'failed', 'cancelled', 'refunded')
 			.default('pending'),
 		payment_method: Joi.string().default('stripe'),
+		stripe_checkout_session_id: Joi.string().allow('', null),
 		notes: Joi.string().allow('', null),
 	});
 

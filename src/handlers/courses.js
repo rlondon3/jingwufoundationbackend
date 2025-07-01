@@ -6,11 +6,7 @@ const {
 	validateModule,
 	validateLesson,
 } = require('../models/course');
-const {
-	authenticationToken,
-	authenticateUserId,
-	requireAdmin,
-} = require('../middleware/auth');
+const { authenticationToken, requireAdmin } = require('../middleware/auth');
 
 /**
  * Course Handlers - All business logic for course operations
@@ -53,6 +49,14 @@ const courses_route = (app) => {
 				return res.status(404).json({ error: 'Course not found' });
 			}
 
+			console.log('=== BACKEND RESPONSE DEBUG ===');
+			console.log(
+				'Course object before sending to frontend:',
+				JSON.stringify(course, null, 2)
+			);
+			console.log('Features in course object:', course.features);
+			console.log('=== END BACKEND DEBUG ===');
+
 			return res.status(200).json(course);
 		} catch (error) {
 			console.error('Get course error:', error);
@@ -66,16 +70,25 @@ const courses_route = (app) => {
 	 */
 	const create = async (req, res) => {
 		try {
+			const { features, ...courseData } = req.body; // Extract features separately
+
 			// Validate course data
-			const { error } = validateCourse(req.body);
+			const { error } = validateCourse(courseData);
 			if (error) {
 				return res.status(400).json({ error: error.details[0].message });
 			}
 
 			const store = new CourseStore(req.app.locals.pool);
-			const newCourse = await store.create(req.body);
+			const newCourse = await store.create(courseData);
 
-			return res.status(201).json(newCourse);
+			// Add course features if provided
+			if (features !== undefined && features.length > 0) {
+				await store.updateCourseFeatures(newCourse.id, features);
+			}
+
+			// Return created course with features
+			const fullCourse = await store.show(newCourse.id);
+			return res.status(201).json(fullCourse);
 		} catch (error) {
 			console.error('Create course error:', error);
 			return res.status(500).json({ error: 'Failed to create course' });
@@ -88,20 +101,40 @@ const courses_route = (app) => {
 	 */
 	const update = async (req, res) => {
 		try {
+			const store = new CourseStore(req.app.locals.pool);
+			
+			// Get the current course first to check for image changes
+			const currentCourse = await store.show(parseInt(req.params.id));
+			if (!currentCourse) {
+				return res.status(404).json({ error: 'Course not found' });
+			}
+
 			// Validate course data
 			const { error } = validateCourse(req.body);
 			if (error) {
 				return res.status(400).json({ error: error.details[0].message });
 			}
 
-			const store = new CourseStore(req.app.locals.pool);
+			// Update the course
 			const updatedCourse = await store.update(
 				req.body,
 				parseInt(req.params.id)
 			);
 
-			if (!updatedCourse) {
-				return res.status(404).json({ error: 'Course not found' });
+			// Clean up old Cloudinary image if it changed
+			if (currentCourse.image_url && req.body.image_url && 
+				currentCourse.image_url !== req.body.image_url) {
+				try {
+					const { deleteImageDirect, extractPublicIdFromUrl } = require('./cloudinary');
+					const publicId = extractPublicIdFromUrl(currentCourse.image_url);
+					if (publicId) {
+						await deleteImageDirect(publicId);
+						console.log('Deleted old Cloudinary course image:', publicId);
+					}
+				} catch (imageError) {
+					console.warn('Failed to delete old Cloudinary course image:', imageError.message);
+					// Don't fail the operation if image cleanup fails
+				}
 			}
 
 			return res.status(200).json(updatedCourse);
@@ -118,10 +151,29 @@ const courses_route = (app) => {
 	const deleteCourse = async (req, res) => {
 		try {
 			const store = new CourseStore(req.app.locals.pool);
+			
+			// Get the course first to check for images
+			const courseToDelete = await store.show(parseInt(req.params.id));
+			if (!courseToDelete) {
+				return res.status(404).json({ error: 'Course not found' });
+			}
+
+			// Delete the course from database
 			const deletedCourse = await store.delete(parseInt(req.params.id));
 
-			if (!deletedCourse) {
-				return res.status(404).json({ error: 'Course not found' });
+			// Clean up Cloudinary images if they exist
+			if (courseToDelete.image_url) {
+				try {
+					const { deleteImageDirect, extractPublicIdFromUrl } = require('./cloudinary');
+					const publicId = extractPublicIdFromUrl(courseToDelete.image_url);
+					if (publicId) {
+						await deleteImageDirect(publicId);
+						console.log('Deleted Cloudinary course image:', publicId);
+					}
+				} catch (imageError) {
+					console.warn('Failed to delete Cloudinary course image:', imageError.message);
+					// Don't fail the operation if image cleanup fails
+				}
 			}
 
 			return res.status(200).json({
@@ -222,52 +274,122 @@ const courses_route = (app) => {
 	// ========================
 
 	/**
+	 * Get all lessons for a course
+	 * GET /course/:courseId/lessons
+	 */
+	const getLessonsByCourse = async (req, res) => {
+		const { courseId } = req.params;
+
+		try {
+			const store = new CourseStore(req.app.locals.pool);
+			const lessons = await store.getLessonsByCourse(parseInt(courseId));
+			return res.status(200).json(lessons);
+		} catch (error) {
+			console.error('Get lessons by course error:', error);
+			return res.status(500).json({ error: 'Failed to get lessons' });
+		}
+	};
+
+	/**
+	 * Get lessons for a specific module
+	 * GET /module/:moduleId/lessons
+	 */
+	const getLessonsByModule = async (req, res) => {
+		const { moduleId } = req.params;
+
+		try {
+			const store = new CourseStore(req.app.locals.pool);
+			const lessons = await store.getLessonsByModule(parseInt(moduleId));
+			return res.status(200).json(lessons);
+		} catch (error) {
+			console.error('Get lessons by module error:', error);
+			return res.status(500).json({ error: 'Failed to get lessons' });
+		}
+	};
+
+	/**
 	 * Create new lesson for a module
 	 * POST /modules/:moduleId/lessons
 	 */
 	const createLesson = async (req, res) => {
+		const { moduleId } = req.params;
+
 		try {
-			const lessonData = {
-				...req.body,
-				module_id: parseInt(req.params.moduleId),
+			const store = new CourseStore(req.app.locals.pool);
+
+			// Get the next order sequence automatically
+			const nextOrder = await store.getNextLessonOrderSequence(
+				parseInt(moduleId)
+			);
+
+			const lesson = {
+				module_id: parseInt(moduleId),
+				title: req.body.title,
+				lesson_type: req.body.lesson_type,
+				content_url: req.body.content_url,
+				content_text: req.body.content_text,
+				duration_minutes: req.body.duration_minutes,
+				order_sequence: req.body.order_sequence || nextOrder, // Use provided or auto-generate
+				is_required: req.body.is_required,
 			};
 
 			// Validate lesson data
-			const { error } = validateLesson(lessonData);
+			const { error } = validateLesson(lesson);
 			if (error) {
 				return res.status(400).json({ error: error.details[0].message });
 			}
 
-			const store = new CourseStore(req.app.locals.pool);
-			const newLesson = await store.createLesson(lessonData);
-
+			const newLesson = await store.createLesson(lesson);
 			return res.status(201).json(newLesson);
 		} catch (error) {
 			console.error('Create lesson error:', error);
 			return res.status(500).json({ error: 'Failed to create lesson' });
 		}
 	};
-
 	/**
 	 * Update existing lesson
 	 * PUT /lessons/:id
 	 */
 	const updateLesson = async (req, res) => {
 		try {
+			const store = new CourseStore(req.app.locals.pool);
+			
+			// Get the current lesson first to check for content_url changes
+			const sql = 'SELECT * FROM lessons WHERE id = $1';
+			const client = req.app.locals.pool;
+			const lessonResult = await client.query(sql, [parseInt(req.params.id)]);
+			const currentLesson = lessonResult.rows[0];
+			
+			if (!currentLesson) {
+				return res.status(404).json({ error: 'Lesson not found' });
+			}
+
 			// Validate lesson data
 			const { error } = validateLesson(req.body);
 			if (error) {
 				return res.status(400).json({ error: error.details[0].message });
 			}
 
-			const store = new CourseStore(req.app.locals.pool);
+			// Update the lesson
 			const updatedLesson = await store.updateLesson(
 				req.body,
 				parseInt(req.params.id)
 			);
 
-			if (!updatedLesson) {
-				return res.status(404).json({ error: 'Lesson not found' });
+			// Clean up old Cloudinary content if it changed
+			if (currentLesson.content_url && req.body.content_url && 
+				currentLesson.content_url !== req.body.content_url) {
+				try {
+					const { deleteImageDirect, extractPublicIdFromUrl } = require('./cloudinary');
+					const publicId = extractPublicIdFromUrl(currentLesson.content_url);
+					if (publicId) {
+						await deleteImageDirect(publicId);
+						console.log('Deleted old Cloudinary lesson content:', publicId);
+					}
+				} catch (imageError) {
+					console.warn('Failed to delete old Cloudinary lesson content:', imageError.message);
+					// Don't fail the operation if image cleanup fails
+				}
 			}
 
 			return res.status(200).json(updatedLesson);
@@ -284,10 +406,33 @@ const courses_route = (app) => {
 	const deleteLesson = async (req, res) => {
 		try {
 			const store = new CourseStore(req.app.locals.pool);
+			
+			// Get the lesson first to check for content
+			const sql = 'SELECT * FROM lessons WHERE id = $1';
+			const client = req.app.locals.pool;
+			const lessonResult = await client.query(sql, [parseInt(req.params.id)]);
+			const lessonToDelete = lessonResult.rows[0];
+			
+			if (!lessonToDelete) {
+				return res.status(404).json({ error: 'Lesson not found' });
+			}
+
+			// Delete the lesson from database
 			const deletedLesson = await store.deleteLesson(parseInt(req.params.id));
 
-			if (!deletedLesson) {
-				return res.status(404).json({ error: 'Lesson not found' });
+			// Clean up Cloudinary content if it exists
+			if (lessonToDelete.content_url) {
+				try {
+					const { deleteImageDirect, extractPublicIdFromUrl } = require('./cloudinary');
+					const publicId = extractPublicIdFromUrl(lessonToDelete.content_url);
+					if (publicId) {
+						await deleteImageDirect(publicId);
+						console.log('Deleted Cloudinary lesson content:', publicId);
+					}
+				} catch (imageError) {
+					console.warn('Failed to delete Cloudinary lesson content:', imageError.message);
+					// Don't fail the operation if image cleanup fails
+				}
 			}
 
 			return res.status(200).json({
@@ -299,6 +444,62 @@ const courses_route = (app) => {
 			return res.status(500).json({ error: 'Failed to delete lesson' });
 		}
 	};
+
+	app.put(
+		'/courses/:id',
+		authenticationToken,
+		requireAdmin,
+		async (req, res) => {
+			try {
+				const courseId = parseInt(req.params.id);
+				const { features, ...courseData } = req.body; // Extract features separately
+
+				const { error } = validateCourse(courseData);
+				if (error) {
+					return res.status(400).json({ error: error.details[0].message });
+				}
+
+				const store = new CourseStore(req.app.locals.pool);
+
+				// Get the current course first to check for image changes
+				const currentCourse = await store.show(courseId);
+				if (!currentCourse) {
+					return res.status(404).json({ error: 'Course not found' });
+				}
+
+				// Update course basic info
+				const updatedCourse = await store.update(courseData, courseId);
+
+				// Clean up old Cloudinary image if it changed
+				if (currentCourse.image_url && courseData.image_url && 
+					currentCourse.image_url !== courseData.image_url) {
+					try {
+						const { deleteImageDirect, extractPublicIdFromUrl } = require('./cloudinary');
+						const publicId = extractPublicIdFromUrl(currentCourse.image_url);
+						if (publicId) {
+							await deleteImageDirect(publicId);
+							console.log('Deleted old Cloudinary course image:', publicId);
+						}
+					} catch (imageError) {
+						console.warn('Failed to delete old Cloudinary course image:', imageError.message);
+						// Don't fail the operation if image cleanup fails
+					}
+				}
+
+				// Update course features if provided
+				if (features !== undefined) {
+					await store.updateCourseFeatures(courseId, features);
+				}
+
+				// Return updated course with features
+				const fullCourse = await store.show(courseId);
+				res.json(fullCourse);
+			} catch (error) {
+				console.error('Update course error:', error);
+				res.status(500).json({ error: 'Failed to update course' });
+			}
+		}
+	);
 
 	// ========================
 	// PROGRESS HANDLERS
@@ -328,31 +529,6 @@ const courses_route = (app) => {
 		} catch (error) {
 			console.error('Mark lesson complete error:', error);
 			return res.status(500).json({ error: 'Failed to mark lesson complete' });
-		}
-	};
-
-	/**
-	 * Get user's course progress
-	 * GET /users/:userId/courses/:courseId/progress
-	 */
-	const getUserCourseProgress = async (req, res) => {
-		try {
-			const { userId, courseId } = req.params;
-
-			const store = new CourseStore(req.app.locals.pool);
-			const progress = await store.getUserCourseProgress(
-				parseInt(userId),
-				parseInt(courseId)
-			);
-
-			if (!progress) {
-				return res.status(404).json({ error: 'Course progress not found' });
-			}
-
-			return res.status(200).json(progress);
-		} catch (error) {
-			console.error('Get course progress error:', error);
-			return res.status(500).json({ error: 'Failed to get course progress' });
 		}
 	};
 
@@ -396,11 +572,69 @@ const courses_route = (app) => {
 		}
 	};
 
+	/**
+	 * Reorder lessons in a module
+	 * PUT /modules/:moduleId/lessons/reorder
+	 */
+	const reorderLessons = async (req, res) => {
+		const { moduleId } = req.params;
+		const { lessonOrders } = req.body; // [{lessonId: 1, newOrder: 2}, {lessonId: 2, newOrder: 1}]
+
+		try {
+			const store = new CourseStore(req.app.locals.pool);
+			await store.reorderLessons(parseInt(moduleId), lessonOrders);
+
+			// Optionally normalize after reordering
+			const normalizedLessons = await store.normalizeLessonOrder(
+				parseInt(moduleId)
+			);
+
+			return res.status(200).json({
+				message: 'Lessons reordered successfully',
+				lessons: normalizedLessons,
+			});
+		} catch (error) {
+			console.error('Reorder lessons error:', error);
+			return res.status(500).json({ error: 'Failed to reorder lessons' });
+		}
+	};
+
+	/**
+	 * Normalize lesson order in a module
+	 * POST /modules/:moduleId/lessons/normalize
+	 */
+	const normalizeLessonOrder = async (req, res) => {
+		const { moduleId } = req.params;
+
+		try {
+			const store = new CourseStore(req.app.locals.pool);
+			const lessons = await store.normalizeLessonOrder(parseInt(moduleId));
+			return res.status(200).json(lessons);
+		} catch (error) {
+			console.error('Normalize lesson order error:', error);
+			return res
+				.status(500)
+				.json({ error: 'Failed to normalize lesson order' });
+		}
+	};
+
 	// Public routes
 	app.get('/courses', index);
 	app.get('/courses/categories', getCategories);
 	app.get('/courses/search', searchCourses);
 	app.get('/courses/:id', show);
+
+	// New lesson query routes (public or protected as needed)
+	app.get(
+		'/courses/:courseId/lessons',
+		authenticationToken,
+		getLessonsByCourse
+	);
+	app.get(
+		'/modules/:moduleId/lessons',
+		authenticationToken,
+		getLessonsByModule
+	);
 
 	// Protected routes (admin only)
 	app.post('/courses', authenticationToken, requireAdmin, create);
@@ -433,10 +667,18 @@ const courses_route = (app) => {
 		authenticationToken,
 		markLessonComplete
 	);
-	app.get(
-		'/users/:userId/courses/:courseId/progress',
-		authenticateUserId,
-		getUserCourseProgress
+	// reorder and normalize lesson order
+	app.put(
+		'/modules/:moduleId/lessons/reorder',
+		authenticationToken,
+		requireAdmin,
+		reorderLessons
+	);
+	app.post(
+		'/modules/:moduleId/lessons/normalize',
+		authenticationToken,
+		requireAdmin,
+		normalizeLessonOrder
 	);
 };
 

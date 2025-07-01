@@ -163,9 +163,9 @@ class UserStore {
 			const sql = `
         SELECT 
           u.*,
-          p.profile,
-          p.progress,
-          p.courses
+          p.profile AS privacy_profile,
+          p.progress AS privacy_progress,
+          p.courses AS privacy_courses
         FROM users u
         LEFT JOIN privacy_settings p ON u.id = p.user_id
         WHERE u.id = $1
@@ -180,13 +180,16 @@ class UserStore {
 			}
 
 			const user = res.rows[0];
+			console.log(`DEBUG: getUserWithPrivacy for user ${id} - raw database result:`, user);
+			const privacyObject = {
+				profile: user.privacy_profile || 'public',
+				progress: user.privacy_progress || 'public',
+				courses: user.privacy_courses || 'public',
+			};
+			console.log(`DEBUG: getUserWithPrivacy for user ${id} - constructed privacy object:`, privacyObject);
 			return {
 				...user,
-				privacy: {
-					profile: user.profile,
-					progress: user.progress,
-					courses: user.courses,
-				},
+				privacy: privacyObject,
 			};
 		} catch (error) {
 			throw new Error(`Could not get user with privacy: ${error}`);
@@ -210,6 +213,82 @@ class UserStore {
 		}
 	}
 
+	async getCourseEnrollmentCounts() {
+		try {
+			const sql = `
+				SELECT 
+					c.id as course_id,
+					c.title as course_title,
+					c.description as course_description,
+					COUNT(uc.user_id) as enrollment_count,
+					COUNT(CASE WHEN uc.progress = 100 THEN 1 END) as completed_count,
+					COUNT(CASE WHEN uc.progress < 100 THEN 1 END) as active_count
+				FROM courses c
+				LEFT JOIN user_courses uc ON c.id = uc.course_id
+				GROUP BY c.id, c.title, c.description
+				ORDER BY enrollment_count DESC
+			`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql);
+			client.release();
+			return res.rows;
+		} catch (error) {
+			throw new Error(`Could not get course enrollment counts: ${error}`);
+		}
+	}
+
+	async getAllEnrollments() {
+		try {
+			const sql = `
+				SELECT 
+					uc.*,
+					u.name as user_name,
+					u.username,
+					u.email,
+					u.avatar as user_avatar,
+					c.title as course_title,
+					c.description as course_description
+				FROM user_courses uc
+				LEFT JOIN users u ON uc.user_id = u.id
+				LEFT JOIN courses c ON uc.course_id = c.id
+				ORDER BY uc.start_date DESC
+			`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql);
+			client.release();
+			return res.rows;
+		} catch (error) {
+			throw new Error(`Could not get all enrollments: ${error}`);
+		}
+	}
+
+	async getEnrollment(userId, courseId) {
+		try {
+			const sql = `
+				 SELECT 
+                uc.*,
+                u.name as user_name,
+                u.username,
+                u.email,
+                u.avatar as user_avatar,
+                c.title as course_title,
+                c.description as course_description
+				FROM user_courses uc
+				LEFT JOIN courses c ON uc.course_id = c.id
+				WHERE uc.user_id = $1 AND uc.course_id = $2
+			`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [userId, courseId]);
+			client.release();
+			return res.rows[0] || null;
+		} catch (error) {
+			throw new Error(`Could not get enrollment: ${error}`);
+		}
+	}
+
 	async enrollUserInCourse(userId, courseId, startDate) {
 		try {
 			const sql = `
@@ -223,6 +302,22 @@ class UserStore {
 			return res.rows[0];
 		} catch (error) {
 			throw new Error(`Could not enroll user in course: ${error}`);
+		}
+	}
+
+	async isUserEnrolled(userId, courseId) {
+		try {
+			const sql = `
+				SELECT COUNT(*) FROM user_courses 
+				WHERE user_id = $1 AND course_id = $2
+			`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [userId, courseId]);
+			client.release();
+			return parseInt(res.rows[0].count) > 0;
+		} catch (error) {
+			throw new Error(`Could not check enrollment: ${error}`);
 		}
 	}
 
@@ -321,6 +416,46 @@ class UserStore {
 			throw new Error(`Can't retrieve students: ${error}`);
 		}
 	}
+
+	async calculateCourseProgress(userId, courseId) {
+		try {
+			const sql = `
+				SELECT 
+					COUNT(l.id) as total_lessons,
+					COUNT(ulp.id) FILTER (WHERE ulp.completed = true) as completed_lessons,
+					CASE 
+						WHEN COUNT(l.id) > 0 
+						THEN ROUND((COUNT(ulp.id) FILTER (WHERE ulp.completed = true) * 100.0 / COUNT(l.id))::numeric, 0)
+						ELSE 0 
+					END as calculated_progress
+				FROM courses c
+				JOIN modules m ON c.id = m.course_id
+				JOIN lessons l ON m.id = l.module_id
+				LEFT JOIN user_lesson_progress ulp ON l.id = ulp.lesson_id AND ulp.user_id = $1
+				WHERE c.id = $2
+				GROUP BY c.id
+			`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [userId, courseId]);
+			client.release();
+
+			const result = res.rows[0];
+			if (result) {
+				// Update the user_courses table with calculated progress
+				await this.updateCourseProgress(
+					userId,
+					courseId,
+					parseInt(result.calculated_progress)
+				);
+				return parseInt(result.calculated_progress);
+			}
+
+			return 0;
+		} catch (error) {
+			throw new Error(`Could not calculate course progress: ${error}`);
+		}
+	}
 }
 
 function handleUserErrors(user) {
@@ -330,7 +465,7 @@ function handleUserErrors(user) {
 		avatar: Joi.string().uri().allow(''),
 		username: Joi.string().required(),
 		password: Joi.string()
-			.required()
+			.optional()
 			.pattern(
 				/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/
 			)

@@ -1,5 +1,6 @@
 require('dotenv').config();
 const { UserStore, handleUserErrors } = require('../models/user');
+const { CourseStore } = require('../models/course');
 const { generateToken } = require('../middleware/auth');
 
 /**
@@ -131,23 +132,29 @@ const users_route = (app) => {
 	const update = async (req, res) => {
 		const userId = parseInt(req.params.id);
 
-		// Map request body to our new schema structure
-		const user = {
-			name: req.body.name,
-			email: req.body.email,
-			avatar: req.body.avatar,
-			username: req.body.username,
-			password: req.body.password,
-			is_admin: req.body.is_admin,
-			city: req.body.city,
-			country: req.body.country,
-			martial_art: req.body.martial_art,
-			experience: req.body.experience,
-			current_courses: req.body.current_courses,
-			privacy: req.body.privacy,
-		};
-
 		try {
+			// Get the current user first to check for avatar changes
+			const currentUser = await store.show(userId);
+			if (!currentUser) {
+				return res.status(404).json({ error: 'User not found' });
+			}
+
+			// Map request body to our new schema structure
+			const user = {
+				name: req.body.name,
+				email: req.body.email,
+				avatar: req.body.avatar,
+				username: req.body.username,
+				password: req.body.password,
+				is_admin: req.body.is_admin,
+				city: req.body.city,
+				country: req.body.country,
+				martial_art: req.body.martial_art,
+				experience: req.body.experience,
+				current_courses: req.body.current_courses,
+				privacy: req.body.privacy,
+			};
+
 			// Validate user data
 			const { error } = handleUserErrors(user);
 			if (error) {
@@ -156,8 +163,20 @@ const users_route = (app) => {
 
 			// Update user
 			const updatedUser = await store.update(user, userId);
-			if (!updatedUser) {
-				return res.status(404).json({ error: 'User not found' });
+
+			// Clean up old Cloudinary avatar if it changed
+			if (currentUser.avatar && user.avatar && currentUser.avatar !== user.avatar) {
+				try {
+					const { deleteImageDirect, extractPublicIdFromUrl } = require('./cloudinary');
+					const publicId = extractPublicIdFromUrl(currentUser.avatar);
+					if (publicId) {
+						await deleteImageDirect(publicId);
+						console.log('Deleted old Cloudinary avatar:', publicId);
+					}
+				} catch (imageError) {
+					console.warn('Failed to delete old Cloudinary avatar:', imageError.message);
+					// Don't fail the operation if image cleanup fails
+				}
 			}
 
 			// Generate new token with updated info
@@ -185,10 +204,30 @@ const users_route = (app) => {
 	 */
 	const deleteUser = async (req, res) => {
 		try {
-			const deletedUser = await store.delete(parseInt(req.params.id));
-			if (!deletedUser) {
+			// Get the user first to check for avatar
+			const userToDelete = await store.show(parseInt(req.params.id));
+			if (!userToDelete) {
 				return res.status(404).json({ error: 'User not found' });
 			}
+
+			// Delete the user from database
+			const deletedUser = await store.delete(parseInt(req.params.id));
+
+			// Clean up Cloudinary avatar if it exists
+			if (userToDelete.avatar) {
+				try {
+					const { deleteImageDirect, extractPublicIdFromUrl } = require('./cloudinary');
+					const publicId = extractPublicIdFromUrl(userToDelete.avatar);
+					if (publicId) {
+						await deleteImageDirect(publicId);
+						console.log('Deleted Cloudinary avatar:', publicId);
+					}
+				} catch (imageError) {
+					console.warn('Failed to delete Cloudinary avatar:', imageError.message);
+					// Don't fail the operation if image cleanup fails
+				}
+			}
+
 			return res.status(200).json({
 				message: 'User deleted successfully',
 				user: deletedUser,
@@ -305,6 +344,163 @@ const users_route = (app) => {
 		}
 	};
 
+	/**
+	 * Get enrollment counts by course (admin endpoint)
+	 * GET /courses/enrollment-counts - requires admin authentication
+	 */
+	const getCourseEnrollmentCounts = async (req, res) => {
+		try {
+			const counts = await store.getCourseEnrollmentCounts();
+			return res.status(200).json(counts);
+		} catch (error) {
+			console.error('Get course enrollment counts error:', error);
+			return res.status(500).json({ error: 'Failed to get enrollment counts' });
+		}
+	};
+
+	/**
+	 * Get all enrollments (admin endpoint)
+	 * GET /enrollments - requires admin authentication
+	 */
+	const getAllEnrollments = async (req, res) => {
+		try {
+			const enrollments = await store.getAllEnrollments();
+			return res.status(200).json(enrollments);
+		} catch (error) {
+			console.error('Get all enrollments error:', error);
+			return res.status(500).json({ error: 'Failed to get all enrollments' });
+		}
+	};
+
+	/**
+	 * Get specific enrollment details
+	 * GET /user/:id/enrollment/:courseId - requires authentication
+	 */
+	const getEnrollment = async (req, res) => {
+		const { id: userId, courseId } = req.params;
+
+		try {
+			const enrollment = await store.getEnrollment(
+				parseInt(userId),
+				parseInt(courseId)
+			);
+
+			if (!enrollment) {
+				return res.status(404).json({ error: 'Enrollment not found' });
+			}
+
+			return res.status(200).json(enrollment);
+		} catch (error) {
+			console.error('Get enrollment error:', error);
+			return res
+				.status(500)
+				.json({ error: 'Failed to get enrollment details' });
+		}
+	};
+
+	/**
+	 * Check if user is enrolled in a course
+	 * GET /user/:id/enrolled/:courseId - requires authentication
+	 */
+	const checkEnrollment = async (req, res) => {
+		const { id: userId, courseId } = req.params;
+
+		try {
+			const isEnrolled = await store.isUserEnrolled(
+				parseInt(userId),
+				parseInt(courseId)
+			);
+
+			return res.status(200).json({
+				enrolled: isEnrolled,
+				userId: parseInt(userId),
+				courseId: parseInt(courseId),
+			});
+		} catch (error) {
+			console.error('Check enrollment error:', error);
+			return res
+				.status(500)
+				.json({ error: 'Failed to check enrollment status' });
+		}
+	};
+
+	const enrollInCourse = async (req, res) => {
+		const { id: userId, courseId } = req.params;
+		const { startDate } = req.body;
+
+		try {
+			// Check if already enrolled
+			const isAlreadyEnrolled = await store.isUserEnrolled(
+				parseInt(userId),
+				parseInt(courseId)
+			);
+
+			if (isAlreadyEnrolled) {
+				return res
+					.status(400)
+					.json({ error: 'User is already enrolled in this course' });
+			}
+
+			const enrollment = await store.enrollUserInCourse(
+				parseInt(userId),
+				parseInt(courseId),
+				startDate || new Date()
+			);
+
+			return res.status(201).json({
+				message: 'Successfully enrolled in course',
+				enrollment,
+			});
+		} catch (error) {
+			console.error('Enrollment error:', error);
+			return res.status(500).json({ error: 'Failed to enroll in course' });
+		}
+	};
+
+	/**
+	 * Get user's lesson completion status for a course
+	 * GET /user/:id/course/:courseId/lessons/progress
+	 */
+	const getUserLessonProgress = async (req, res) => {
+		const { id: userId, courseId } = req.params;
+
+		try {
+			const courseStore = new CourseStore(req.app.locals.pool);
+			const completedLessons = await courseStore.getUserLessonProgress(
+				parseInt(userId),
+				parseInt(courseId)
+			);
+			
+			return res.status(200).json(completedLessons);
+		} catch (error) {
+			console.error('Get user lesson progress error:', error);
+			return res.status(500).json({ error: 'Failed to get lesson progress' });
+		}
+	};
+
+	/**
+	 * Calculate and update course progress based on completed lessons
+	 * POST /user/:id/course/:courseId/calculate-progress
+	 */
+	const calculateCourseProgress = async (req, res) => {
+		const { id: userId, courseId } = req.params;
+
+		try {
+			const progress = await store.calculateCourseProgress(
+				parseInt(userId),
+				parseInt(courseId)
+			);
+
+			return res.status(200).json({
+				progress,
+				message: 'Progress calculated and updated',
+			});
+		} catch (error) {
+			console.error('Calculate course progress error:', error);
+			return res.status(500).json({ error: 'Failed to calculate progress' });
+		}
+	};
+
 	// Import authentication middleware
 	const {
 		authenticationToken,
@@ -313,7 +509,7 @@ const users_route = (app) => {
 	} = require('../middleware/auth');
 
 	// Define routes
-	app.post('/verify/users', authenticationToken, requireAdmin, index);
+	app.post('/verify/users', authenticationToken, index);
 	app.post('/verify/user/:id', authenticationToken, show);
 	app.post('/create/user', create);
 	app.put('/user/:id', authenticateUserId, update);
@@ -328,6 +524,29 @@ const users_route = (app) => {
 		authenticateUserId,
 		updateCourseProgress
 	);
+	app.get(
+		'/user/:id/course/:courseId/lessons/progress',
+		authenticateUserId,
+		getUserLessonProgress
+	);
+
+	app.post(
+		'/user/:id/course/:courseId/calculate-progress',
+		authenticateUserId,
+		calculateCourseProgress
+	);
+
+	//enrollment routes
+	app.get(
+		'/courses/enrollment-counts',
+		authenticationToken,
+		requireAdmin,
+		getCourseEnrollmentCounts
+	);
+	app.get('/enrollments', authenticationToken, getAllEnrollments);
+	app.get('/user/:id/enrollment/:courseId', authenticateUserId, getEnrollment);
+	app.get('/user/:id/enrolled/:courseId', authenticateUserId, checkEnrollment);
+	app.post('/user/:id/enroll/:courseId', authenticateUserId, enrollInCourse);
 };
 
 module.exports = users_route;

@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 const express = require('express');
 const { Pool } = require('pg');
 const cors = require('cors');
@@ -6,10 +6,16 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const users_route = require('./handlers/users');
 const courses_route = require('./handlers/courses');
+const stripeRoute = require('./handlers/stripe');
+const ordersRoute = require('./handlers/orders');
+const messagesRoute = require('./handlers/messages');
+const news_route = require('./handlers/news');
+const ai_sifu_route = require('./handlers/aiSifu');
 const health_route = require('./handlers/health');
+const cloudinary_routes = require('./handlers/cloudinary');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 const address = `localhost:${PORT}`;
 
 // Database connection
@@ -31,6 +37,8 @@ const testConnection = async () => {
 		client.release();
 	} catch (err) {
 		console.error('❌ Database connection error:', err.message);
+		console.error('❌ Full error:', err);
+		console.error('❌ Server will continue but database operations will fail');
 	}
 };
 
@@ -48,6 +56,7 @@ const corsOptions = {
 
 // app.options('*', cors(corsOptions));
 
+app.use('/stripe/webhook', express.raw({ type: 'application/json' }));
 // Middleware
 app.use(helmet());
 app.use(morgan('dev'));
@@ -68,6 +77,21 @@ app.get('/', function (req, res) {
 users_route(app);
 health_route(app);
 courses_route(app);
+stripeRoute(app);
+ordersRoute(app);
+messagesRoute(app);
+news_route(app);
+ai_sifu_route(app);
+cloudinary_routes(app);
+
+// Error handling for unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+	console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+	console.error('❌ Uncaught Exception:', error);
+});
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
