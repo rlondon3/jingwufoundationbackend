@@ -356,8 +356,9 @@ const courses_route = (app) => {
 			
 			// Get the current lesson first to check for content_url changes
 			const sql = 'SELECT * FROM lessons WHERE id = $1';
-			const client = req.app.locals.pool;
+			const client = await req.app.locals.pool.connect();
 			const lessonResult = await client.query(sql, [parseInt(req.params.id)]);
+			client.release();
 			const currentLesson = lessonResult.rows[0];
 			
 			if (!currentLesson) {
@@ -409,8 +410,9 @@ const courses_route = (app) => {
 			
 			// Get the lesson first to check for content
 			const sql = 'SELECT * FROM lessons WHERE id = $1';
-			const client = req.app.locals.pool;
+			const client = await req.app.locals.pool.connect();
 			const lessonResult = await client.query(sql, [parseInt(req.params.id)]);
+			client.release();
 			const lessonToDelete = lessonResult.rows[0];
 			
 			if (!lessonToDelete) {
@@ -524,6 +526,29 @@ const courses_route = (app) => {
 				parseInt(lessonId),
 				quizScore
 			);
+
+			// Get the course ID for this lesson to update overall course progress
+			const lessonSql = `
+				SELECT m.course_id 
+				FROM lessons l 
+				JOIN modules m ON l.module_id = m.id 
+				WHERE l.id = $1
+			`;
+			const client = await req.app.locals.pool.connect();
+			const lessonResult = await client.query(lessonSql, [parseInt(lessonId)]);
+			client.release();
+			const courseId = lessonResult.rows[0]?.course_id;
+
+			if (courseId) {
+				// Auto-calculate and update course progress
+				const { UserStore } = require('../models/user');
+				const userStore = new UserStore(req.app.locals.pool);
+				const updatedProgress = await userStore.calculateCourseProgress(
+					parseInt(userId),
+					courseId
+				);
+				console.log(`Updated course ${courseId} progress for user ${userId}: ${updatedProgress}%`);
+			}
 
 			return res.status(200).json(progress);
 		} catch (error) {

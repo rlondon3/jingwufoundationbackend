@@ -53,7 +53,7 @@ const authenticateUserId = (req, res, next) => {
 
 		const decoded = jwt.verify(token, process.env.TOKEN_SECRET);
 		const tokenUserId = decoded.user.id;
-		const requestedUserId = parseInt(req.params.id);
+		const requestedUserId = parseInt(req.params.userId || req.params.id);
 
 		if (decoded.user.is_admin) {
 			req.user = decoded.user;

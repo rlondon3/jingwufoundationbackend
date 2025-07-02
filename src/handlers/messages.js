@@ -28,7 +28,31 @@ const getUserConversations = async (req, res) => {
 		const userId = parseInt(req.params.userId);
 
 		const store = new MessageStore(req.app.locals.pool);
-		const conversations = await store.getUserConversations(userId);
+		const rawConversations = await store.getUserConversations(userId);
+
+		// Format conversations for frontend
+		const conversations = rawConversations.map((conv) => ({
+			id: conv.conversation_id,
+			user1_id: conv.user1_id,
+			user2_id: conv.user2_id,
+			created_at: conv.created_at,
+			updated_at: conv.updated_at,
+			last_message: conv.latest_message
+				? {
+						id: 0, // We don't have message ID in the view
+						text: conv.latest_message,
+						sender_id: conv.latest_sender_id,
+						sent_at: conv.last_message_at,
+						is_read: conv.latest_message_status === 'read',
+				  }
+				: null,
+			other_user: {
+				id: conv.other_user_id,
+				name: conv.other_user_name,
+				avatar: conv.other_user_avatar,
+			},
+			unread_count: conv.unread_count || 0,
+		}));
 
 		return res.status(200).json(conversations);
 	} catch (error) {
@@ -203,8 +227,68 @@ const markConversationRead = async (req, res) => {
 	}
 };
 
+// ========================
+// MESSAGE DELETION HANDLERS
+// ========================
+
 /**
- * Delete message
+ * Delete message for current user only (hide from their view)
+ * DELETE /messages/:id/delete-for-me
+ */
+const deleteMessageForUser = async (req, res) => {
+	try {
+		const messageId = parseInt(req.params.id);
+		const userId = req.user.id;
+
+		const store = new MessageStore(req.app.locals.pool);
+		const result = await store.deleteMessageForUser(messageId, userId);
+
+		if (!result) {
+			return res
+				.status(404)
+				.json({ error: 'Message not found or already deleted' });
+		}
+
+		return res.status(200).json({
+			message: 'Message hidden from your view',
+			deleted_for_user: result,
+		});
+	} catch (error) {
+		console.error('Delete message for user error:', error);
+		return res.status(500).json({ error: 'Failed to delete message for user' });
+	}
+};
+
+/**
+ * Restore deleted message for current user
+ * POST /messages/:id/restore
+ */
+const restoreMessageForUser = async (req, res) => {
+	try {
+		const messageId = parseInt(req.params.id);
+		const userId = req.user.id;
+
+		const store = new MessageStore(req.app.locals.pool);
+		const result = await store.restoreMessageForUser(messageId, userId);
+
+		if (!result) {
+			return res
+				.status(404)
+				.json({ error: 'Message not found in deleted items' });
+		}
+
+		return res.status(200).json({
+			message: 'Message restored to your view',
+			restored: result,
+		});
+	} catch (error) {
+		console.error('Restore message for user error:', error);
+		return res.status(500).json({ error: 'Failed to restore message' });
+	}
+};
+
+/**
+ * Delete message globally (sender only - original functionality)
  * DELETE /messages/:id
  */
 const deleteMessage = async (req, res) => {
@@ -216,12 +300,84 @@ const deleteMessage = async (req, res) => {
 		const message = await store.deleteMessage(messageId, userId);
 
 		return res.status(200).json({
-			message: 'Message deleted successfully',
+			message: 'Message deleted for everyone',
 			deleted_message: message,
 		});
 	} catch (error) {
 		console.error('Delete message error:', error);
 		return res.status(500).json({ error: 'Failed to delete message' });
+	}
+};
+
+/**
+ * Delete conversation for current user only (hide from their view)
+ * DELETE /conversations/:id/delete-for-me
+ */
+const deleteConversationForUser = async (req, res) => {
+	try {
+		const conversationId = parseInt(req.params.id);
+		const userId = req.user.id;
+
+		const store = new MessageStore(req.app.locals.pool);
+		const result = await store.deleteConversationForUser(
+			conversationId,
+			userId
+		);
+
+		return res.status(200).json({
+			message: 'Conversation hidden from your view',
+			deleted_count: result.deleted_count,
+		});
+	} catch (error) {
+		console.error('Delete conversation for user error:', error);
+		return res
+			.status(500)
+			.json({ error: 'Failed to delete conversation for user' });
+	}
+};
+
+/**
+ * Delete conversation globally (original functionality)
+ * DELETE /conversations/:id
+ */
+const deleteConversation = async (req, res) => {
+	try {
+		const conversationId = parseInt(req.params.id);
+		const userId = req.user.id;
+
+		const store = new MessageStore(req.app.locals.pool);
+		const result = await store.deleteConversation(conversationId, userId);
+
+		return res.status(200).json({
+			message: 'Conversation deleted for everyone',
+			deleted_count: result.deleted_count,
+		});
+	} catch (error) {
+		console.error('Delete conversation error:', error);
+		return res.status(500).json({ error: 'Failed to delete conversation' });
+	}
+};
+
+/**
+ * Get user's deleted messages (for recovery)
+ * GET /users/:userId/messages/deleted
+ */
+const getUserDeletedMessages = async (req, res) => {
+	try {
+		const userId = parseInt(req.params.userId);
+		const limit = parseInt(req.query.limit) || 50;
+
+		if (limit > 100) {
+			return res.status(400).json({ error: 'Limit cannot exceed 100' });
+		}
+
+		const store = new MessageStore(req.app.locals.pool);
+		const messages = await store.getUserDeletedMessages(userId, limit);
+
+		return res.status(200).json(messages);
+	} catch (error) {
+		console.error('Get user deleted messages error:', error);
+		return res.status(500).json({ error: 'Failed to get deleted messages' });
 	}
 };
 
@@ -364,6 +520,13 @@ const messages_route = (app) => {
 	);
 	app.get('/users/:userId/messages/search', authenticateUserId, searchMessages);
 
+	// User deleted messages
+	app.get(
+		'/users/:userId/messages/deleted',
+		authenticateUserId,
+		getUserDeletedMessages
+	);
+
 	// Conversation routes
 	app.post('/conversations', authenticationToken, getOrCreateConversation);
 	app.get('/conversations/:id', authenticationToken, getConversation);
@@ -374,10 +537,26 @@ const messages_route = (app) => {
 	);
 	app.put('/conversations/:id/read', authenticationToken, markConversationRead);
 
+	// Conversation deletion routes
+	app.delete('/conversations/:id', authenticationToken, deleteConversation); // Global delete
+	app.delete(
+		'/conversations/:id/delete-for-me',
+		authenticationToken,
+		deleteConversationForUser
+	); // Per-user delete
+
 	// Message routes
 	app.post('/messages', authenticationToken, sendMessage);
 	app.put('/messages/:id/read', authenticationToken, markMessageRead);
-	app.delete('/messages/:id', authenticationToken, deleteMessage);
+
+	// Message deletion routes
+	app.delete('/messages/:id', authenticationToken, deleteMessage); // Global delete (sender only)
+	app.delete(
+		'/messages/:id/delete-for-me',
+		authenticationToken,
+		deleteMessageForUser
+	); // Per-user delete
+	app.post('/messages/:id/restore', authenticationToken, restoreMessageForUser); // Restore deleted message
 
 	// Admin routes
 	app.get(

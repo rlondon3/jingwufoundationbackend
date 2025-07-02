@@ -464,6 +464,11 @@ const users_route = (app) => {
 	const getUserLessonProgress = async (req, res) => {
 		const { id: userId, courseId } = req.params;
 
+		// Check if user is accessing their own data or if they're an admin
+		if (req.user.id !== parseInt(userId) && !req.user.is_admin) {
+			return res.status(403).json({ error: 'Access denied' });
+		}
+
 		try {
 			const courseStore = new CourseStore(req.app.locals.pool);
 			const completedLessons = await courseStore.getUserLessonProgress(
@@ -526,7 +531,7 @@ const users_route = (app) => {
 	);
 	app.get(
 		'/user/:id/course/:courseId/lessons/progress',
-		authenticateUserId,
+		authenticationToken,
 		getUserLessonProgress
 	);
 
