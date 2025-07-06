@@ -1,4 +1,5 @@
 {
+	"defaultEnv": { "ENV": "NODE_ENV" },
 	"dev": {
 		"driver": "pg",
 		"ENV": "DATABASE_URL"
@@ -8,10 +9,6 @@
 		"ENV": "DATABASE_URL"
 	},
 	"production": {
-		"driver": "pg",
-		"ENV": "DATABASE_URL"
-	},
-	"prod": {
 		"driver": "pg",
 		"ENV": "DATABASE_URL"
 	}
