@@ -48,7 +48,6 @@ class AISifuStore {
 	 */
 	async canUserAsk(userId, courseId = null) {
 		try {
-			console.log('Checking access for user:', userId, 'courseId:', courseId, 'courseId type:', typeof courseId);
 			const client = await this.pool.connect();
 
 			// Get user info
@@ -146,12 +145,6 @@ class AISifuStore {
         `;
 				const anyEnrollmentRes = await client.query(anyEnrollmentSql, [userId]);
 
-				console.log('General access check results:', {
-					userId,
-					anyPurchases: anyPurchaseRes.rows.length,
-					anyEnrollments: anyEnrollmentRes.rows.length,
-					enrollmentRows: anyEnrollmentRes.rows
-				});
 
 				// User has general access if they have ANY course purchase OR enrollment
 				if (anyPurchaseRes.rows.length > 0 || anyEnrollmentRes.rows.length > 0) {

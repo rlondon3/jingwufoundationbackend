@@ -49,14 +49,6 @@ const courses_route = (app) => {
 				return res.status(404).json({ error: 'Course not found' });
 			}
 
-			console.log('=== BACKEND RESPONSE DEBUG ===');
-			console.log(
-				'Course object before sending to frontend:',
-				JSON.stringify(course, null, 2)
-			);
-			console.log('Features in course object:', course.features);
-			console.log('=== END BACKEND DEBUG ===');
-
 			return res.status(200).json(course);
 		} catch (error) {
 			console.error('Get course error:', error);
@@ -547,7 +539,6 @@ const courses_route = (app) => {
 					parseInt(userId),
 					courseId
 				);
-				console.log(`Updated course ${courseId} progress for user ${userId}: ${updatedProgress}%`);
 			}
 
 			return res.status(200).json(progress);

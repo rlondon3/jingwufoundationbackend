@@ -257,7 +257,6 @@ const verifyPayment = async (req, res) => {
 					session.payment_intent
 				);
 
-				console.log(`Payment verified and order completed for session: ${session_id}`);
 				
 				return res.json({ 
 					success: true, 
@@ -266,7 +265,6 @@ const verifyPayment = async (req, res) => {
 				});
 			} catch (error) {
 				// Order might already be completed
-				console.log('Order completion error (possibly already completed):', error.message);
 				return res.json({ 
 					success: true, 
 					message: 'Payment already processed',
@@ -338,9 +336,6 @@ async function handleStripeEvent(event, pool) {
 					payment_intent
 				);
 
-				console.log(
-					`Successfully processed course purchase for session: ${checkout_session_id}, Order ID: ${completedOrder.id}`
-				);
 			} catch (error) {
 				console.error(
 					`Failed to complete main order for session ${checkout_session_id}:`,
@@ -352,8 +347,7 @@ async function handleStripeEvent(event, pool) {
 	}
 
 	if (isSubscription) {
-		console.log(`Starting subscription sync for customer: ${customerId}`);
-		await syncCustomerFromStripe(customerId, pool);
+			await syncCustomerFromStripe(customerId, pool);
 	}
 }
 
@@ -373,8 +367,7 @@ async function syncCustomerFromStripe(customerId, pool) {
 		});
 
 		if (subscriptions.data.length === 0) {
-			console.log(`No subscriptions found for customer: ${customerId}`);
-			await subscriptionStore.upsert({
+				await subscriptionStore.upsert({
 				customerId,
 				subscriptionId: null,
 				priceId: null,
@@ -405,7 +398,6 @@ async function syncCustomerFromStripe(customerId, pool) {
 			status: subscription.status,
 		});
 
-		console.log(`Successfully synced subscription for customer: ${customerId}`);
 	} catch (error) {
 		console.error(
 			`Failed to sync subscription for customer ${customerId}:`,

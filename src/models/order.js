@@ -212,8 +212,6 @@ class OrderStore {
 			const completedOrder = orderRes.rows[0];
 
 			// Enroll user in course - simplified direct approach
-			console.log(`Attempting to enroll user ${completedOrder.user_id} in course ${completedOrder.course_id}`);
-			
 			const enrollmentSql = `
         INSERT INTO user_courses (user_id, course_id, start_date, progress) 
         VALUES ($1, $2, CURRENT_TIMESTAMP, 0) 
@@ -226,9 +224,6 @@ class OrderStore {
 				completedOrder.user_id,
 				completedOrder.course_id,
 			]);
-
-			console.log(`Enrollment result:`, enrollmentRes.rows[0]);
-			console.log(`User ${completedOrder.user_id} enrolled in course ${completedOrder.course_id} after payment completion`);
 
 			await client.query('COMMIT');
 			

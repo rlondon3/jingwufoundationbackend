@@ -188,13 +188,11 @@ class UserStore {
 			}
 
 			const user = res.rows[0];
-			console.log(`DEBUG: getUserWithPrivacy for user ${id} - raw database result:`, user);
 			const privacyObject = {
 				profile: user.privacy_profile || 'public',
 				progress: user.privacy_progress || 'public',
 				courses: user.privacy_courses || 'public',
 			};
-			console.log(`DEBUG: getUserWithPrivacy for user ${id} - constructed privacy object:`, privacyObject);
 			return {
 				...user,
 				privacy: privacyObject,

@@ -24,12 +24,6 @@ const askQuestion = async (req, res) => {
 		const { question, course_id } = req.body;
 		const userId = req.user.id;
 
-		console.log('AI Sifu request:', {
-			userId,
-			question: question?.substring(0, 50) + '...',
-			course_id,
-			course_id_type: typeof course_id
-		});
 
 		// Validate question data
 		const { error } = validateAIQuestion({ question, course_id });
@@ -60,30 +54,21 @@ const askQuestion = async (req, res) => {
 
 		const cachedResponse = await store.getCachedResponse(question);
 		if (cachedResponse) {
-			console.log('Cache hit for question:', question.substring(0, 50) + '...');
 			response = cachedResponse.response_data;
 			cached = true;
 			costCents = 0; // Cached responses don't cost anything
 		} else {
 			// Generate new AI response
-			console.log('Cache miss - generating new AI response for:', question.substring(0, 50) + '...');
 
 			try {
-				console.log('Creating NeigongManualAgent...');
 				const agent = new NeigongManualAgent();
-				console.log('Agent created successfully');
-
-				console.log('Calling agent.handleQuery...');
 				response = await agent.handleQuery(question);
-				console.log('Agent response received successfully');
 
 				// Calculate actual cost
 				costCents = agent.estimateResponseCost(question, response);
-				console.log('Estimated cost:', costCents, 'cents');
 
 				// Cache the response for future use
 				await store.cacheResponse(question, response);
-				console.log('Response cached successfully');
 			} catch (aiError) {
 				console.error('AI generation error:', aiError);
 				console.error('Error stack:', aiError.stack);
@@ -117,10 +102,7 @@ const askQuestion = async (req, res) => {
 
 		// Only record usage for new responses (not cached ones)
 		if (!cached) {
-			console.log('Recording usage for new response:', { userId, costCents, usageCourseId, originalCourseId: course_id });
 			await store.recordUsage(userId, costCents, usageCourseId);
-		} else {
-			console.log('Skipping usage recording for cached response');
 		}
 
 		// Record analytics (always record for tracking purposes)
@@ -147,7 +129,6 @@ const askQuestion = async (req, res) => {
 				cached_response: cached,
 				session_id: null // Could be enhanced to track sessions later
 			});
-			console.log('Conversation saved to history successfully');
 		} catch (historyError) {
 			console.error('Failed to save conversation to history:', historyError);
 			// Don't fail the request if history saving fails
