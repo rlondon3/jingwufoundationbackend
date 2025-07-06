@@ -1,7 +1,0 @@
-{
-	"defaultEnv": "prod",
-	"production": {
-		"driver": "pg",
-		"ENV": "DATABASE_URL"
-	}
-}
