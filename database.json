@@ -1,6 +1,0 @@
-{
-	"defaultEnv": "production",
-	"production": {
-		"ENV": "DATABASE_URL"
-	}
-}
