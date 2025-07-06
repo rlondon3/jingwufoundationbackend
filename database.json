@@ -1,9 +1,5 @@
 {
-	"defaultEnv": "dev",
-	"dev": {
-		"driver": "pg",
-		"ENV": "DATABASE_URL"
-	},
+	"defaultEnv": "production",
 	"production": {
 		"driver": "pg",
 		"ENV": "DATABASE_URL"
