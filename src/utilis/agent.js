@@ -44,13 +44,10 @@ class NeigongManualAgent {
 
 	async handleQuery(query) {
 		try {
-			console.log('Processing AI Sifu query:', query);
-
 			// Find relevant Jingwu terms
 			let terms = [];
 			try {
 				terms = this.termNormalizer.findJingwuTerms(query);
-				console.log('Found Jingwu terms:', terms);
 			} catch (termError) {
 				console.error('Error in findJingwuTerms:', termError);
 			}
@@ -59,7 +56,6 @@ class NeigongManualAgent {
 			let futureTopic = null;
 			try {
 				futureTopic = this.termNormalizer.isFutureTopic(query);
-				console.log('Future topic check:', futureTopic);
 			} catch (futureTopicError) {
 				console.error('Error in isFutureTopic:', futureTopicError);
 			}

@@ -16,7 +16,6 @@ class PDFProcessor {
 			const pdfFiles = files.filter((file) =>
 				file.toLowerCase().endsWith('.pdf')
 			);
-			console.log(`Found ${pdfFiles.length} PDF files in resources directory`);
 			return pdfFiles;
 		} catch (error) {
 			console.error('Error loading PDFs:', error);
