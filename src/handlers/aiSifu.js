@@ -1,6 +1,7 @@
 // handlers/ai-sifu.js
 require('dotenv').config();
 const { AISifuStore, validateAIQuestion } = require('../models/aiSifu');
+const { AIConversationStore } = require('../models/aiSifuHistory');
 const { authenticationToken, requireAdmin } = require('../middleware/auth');
 const { NeigongManualAgent } = require('../utilis/agent');
 
@@ -22,6 +23,13 @@ const askQuestion = async (req, res) => {
 	try {
 		const { question, course_id } = req.body;
 		const userId = req.user.id;
+
+		console.log('AI Sifu request:', {
+			userId,
+			question: question?.substring(0, 50) + '...',
+			course_id,
+			course_id_type: typeof course_id
+		});
 
 		// Validate question data
 		const { error } = validateAIQuestion({ question, course_id });
@@ -45,47 +53,77 @@ const askQuestion = async (req, res) => {
 			});
 		}
 
-		// TEMPORARILY DISABLE CACHE - ALWAYS GENERATE NEW RESPONSE
+		// Check cache first
 		let response;
 		let cached = false;
 		let costCents = 0;
 
-		// Comment out cache check for now
-		// const cachedResponse = await store.getCachedResponse(question);
-		// if (cachedResponse) { ... }
+		const cachedResponse = await store.getCachedResponse(question);
+		if (cachedResponse) {
+			console.log('Cache hit for question:', question.substring(0, 50) + '...');
+			response = cachedResponse.response_data;
+			cached = true;
+			costCents = 0; // Cached responses don't cost anything
+		} else {
+			// Generate new AI response
+			console.log('Cache miss - generating new AI response for:', question.substring(0, 50) + '...');
 
-		// Always generate new AI response for debugging
-		console.log('Generating new AI response for:', question);
+			try {
+				console.log('Creating NeigongManualAgent...');
+				const agent = new NeigongManualAgent();
+				console.log('Agent created successfully');
 
-		try {
-			console.log('Creating NeigongManualAgent...');
-			const agent = new NeigongManualAgent();
-			console.log('Agent created successfully');
+				console.log('Calling agent.handleQuery...');
+				response = await agent.handleQuery(question);
+				console.log('Agent response received successfully');
 
-			console.log('Calling agent.handleQuery...');
-			response = await agent.handleQuery(question);
-			console.log(
-				'Agent response received:',
-				JSON.stringify(response, null, 2)
-			);
+				// Calculate actual cost
+				costCents = agent.estimateResponseCost(question, response);
+				console.log('Estimated cost:', costCents, 'cents');
 
-			// Calculate actual cost
-			costCents = agent.estimateResponseCost(question, response);
-			console.log('Estimated cost:', costCents);
-
-			// Temporarily disable caching too
-			// await store.cacheResponse(question, response);
-			console.log('Skipping cache storage for debugging');
-		} catch (aiError) {
-			console.error('AI generation error:', aiError);
-			console.error('Error stack:', aiError.stack);
-			return res.status(500).json({ error: 'Failed to generate AI response' });
+				// Cache the response for future use
+				await store.cacheResponse(question, response);
+				console.log('Response cached successfully');
+			} catch (aiError) {
+				console.error('AI generation error:', aiError);
+				console.error('Error stack:', aiError.stack);
+				return res.status(500).json({ error: 'Failed to generate AI response' });
+			}
 		}
 
-		// Record usage
-		await store.recordUsage(userId, costCents, course_id);
+		// Determine which course to record usage for
+		let usageCourseId = course_id;
+		
+		// If no specific course ID provided, use the first enrolled course for usage tracking
+		if (!usageCourseId) {
+			const client = req.app.locals.pool;
+			
+			// Try to find first purchased course
+			const purchaseQuery = 'SELECT DISTINCT course_id FROM orders WHERE user_id = $1 AND order_status = \'completed\' LIMIT 1';
+			const purchaseResult = await client.query(purchaseQuery, [userId]);
+			
+			if (purchaseResult.rows.length > 0) {
+				usageCourseId = purchaseResult.rows[0].course_id;
+			} else {
+				// Try to find first enrolled course
+				const enrollmentQuery = 'SELECT DISTINCT course_id FROM user_courses WHERE user_id = $1 LIMIT 1';
+				const enrollmentResult = await client.query(enrollmentQuery, [userId]);
+				
+				if (enrollmentResult.rows.length > 0) {
+					usageCourseId = enrollmentResult.rows[0].course_id;
+				}
+			}
+		}
 
-		// Record analytics
+		// Only record usage for new responses (not cached ones)
+		if (!cached) {
+			console.log('Recording usage for new response:', { userId, costCents, usageCourseId, originalCourseId: course_id });
+			await store.recordUsage(userId, costCents, usageCourseId);
+		} else {
+			console.log('Skipping usage recording for cached response');
+		}
+
+		// Record analytics (always record for tracking purposes)
 		const responseTime = Date.now() - startTime;
 		await store.recordQuestion(
 			userId,
@@ -93,8 +131,27 @@ const askQuestion = async (req, res) => {
 			cached,
 			costCents,
 			responseTime,
-			course_id
+			usageCourseId || course_id
 		);
+
+		// Save to conversation history for "Sifu's Notes" feature
+		try {
+			const conversationStore = new AIConversationStore(req.app.locals.pool);
+			await conversationStore.saveConversation({
+				user_id: userId,
+				question_text: question,
+				response_text: typeof response.response === 'string' ? response.response : JSON.stringify(response.response),
+				course_context: usageCourseId || course_id || null,
+				cost_cents: costCents,
+				response_time_ms: responseTime,
+				cached_response: cached,
+				session_id: null // Could be enhanced to track sessions later
+			});
+			console.log('Conversation saved to history successfully');
+		} catch (historyError) {
+			console.error('Failed to save conversation to history:', historyError);
+			// Don't fail the request if history saving fails
+		}
 
 		return res.status(200).json({
 			response: response.response,
@@ -122,13 +179,22 @@ const getUserUsage = async (req, res) => {
 
 		const usage = await store.getUserUsage(userId);
 
-		// Get user's purchased courses
+		// Get user's accessible courses (purchased OR enrolled)
 		const client = req.app.locals.pool;
 		const coursesSql = `
       SELECT DISTINCT c.id, c.title 
       FROM courses c
-      JOIN orders o ON c.id = o.course_id
-      WHERE o.user_id = $1 AND o.order_status = 'completed'
+      WHERE c.id IN (
+        -- Courses purchased via orders
+        SELECT DISTINCT o.course_id 
+        FROM orders o 
+        WHERE o.user_id = $1 AND o.order_status = 'completed'
+        UNION
+        -- Courses enrolled directly
+        SELECT DISTINCT uc.course_id 
+        FROM user_courses uc 
+        WHERE uc.user_id = $1
+      )
     `;
 		const coursesRes = await client.query(coursesSql, [userId]);
 

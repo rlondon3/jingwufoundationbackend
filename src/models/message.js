@@ -145,7 +145,7 @@ class MessageStore {
           SELECT 1 FROM message_deletions md 
           WHERE md.message_id = m.id AND md.user_id = $2
         )
-        ORDER BY m.sent_at DESC
+        ORDER BY m.sent_at ASC
         LIMIT $3 OFFSET $4
       `;
 
@@ -361,8 +361,24 @@ class MessageStore {
       `;
 
 			const res = await client.query(deleteSql, [conversationId, userId]);
-			client.release();
 
+			// Check if all messages in conversation are now deleted by both users
+			const checkAllDeletedSql = `
+        SELECT COUNT(*) as total_messages,
+               COUNT(md.message_id) as deleted_messages
+        FROM messages m
+        LEFT JOIN message_deletions md ON m.id = md.message_id
+        WHERE m.conversation_id = $1
+      `;
+			const checkRes = await client.query(checkAllDeletedSql, [conversationId]);
+			
+			// If all messages are deleted by all users, delete the conversation
+			if (checkRes.rows[0].total_messages > 0 && 
+				checkRes.rows[0].deleted_messages >= checkRes.rows[0].total_messages * 2) {
+				await client.query('DELETE FROM conversations WHERE id = $1', [conversationId]);
+			}
+
+			client.release();
 			return { deleted_count: res.rowCount };
 		} catch (error) {
 			throw new Error(`Could not delete conversation for user: ${error}`);
@@ -388,19 +404,26 @@ class MessageStore {
 				throw new Error('Access denied to conversation');
 			}
 
-			// Soft delete all messages in the conversation
-			const deleteSql = `
-        UPDATE messages SET 
-          text = '[Message deleted]',
-          updated_at = CURRENT_TIMESTAMP
-        WHERE conversation_id = $1
-        AND text != '[Message deleted]'
-      `;
+			// Count messages before deletion
+			const countRes = await client.query(
+				'SELECT COUNT(*) as count FROM messages WHERE conversation_id = $1', 
+				[conversationId]
+			);
 
-			const res = await client.query(deleteSql, [conversationId]);
+			// Delete all message_deletions first (foreign key constraint)
+			await client.query(
+				'DELETE FROM message_deletions WHERE message_id IN (SELECT id FROM messages WHERE conversation_id = $1)', 
+				[conversationId]
+			);
+
+			// Delete all messages in the conversation
+			await client.query('DELETE FROM messages WHERE conversation_id = $1', [conversationId]);
+
+			// Delete the conversation itself
+			await client.query('DELETE FROM conversations WHERE id = $1', [conversationId]);
+
 			client.release();
-
-			return { deleted_count: res.rowCount };
+			return { deleted_count: parseInt(countRes.rows[0].count) };
 		} catch (error) {
 			throw new Error(`Could not delete conversation: ${error}`);
 		}
@@ -582,6 +605,61 @@ class MessageStore {
 			return res.rows[0];
 		} catch (error) {
 			throw new Error(`Could not get message statistics: ${error}`);
+		}
+	}
+
+	async runCleanup() {
+		const client = await this.pool.connect();
+
+		try {
+			await client.query('BEGIN');
+
+			// 1. Clean orphaned messages
+			const result1 = await client.query(`
+				DELETE FROM messages 
+				WHERE conversation_id IN (
+					SELECT c.id FROM conversations c
+					WHERE NOT EXISTS (SELECT 1 FROM users WHERE id = c.user1_id)
+					AND NOT EXISTS (SELECT 1 FROM users WHERE id = c.user2_id)
+				)
+			`);
+
+			// 2. Clean double-deleted messages
+			const result2 = await client.query(`
+				DELETE FROM messages m
+				WHERE EXISTS (
+					SELECT 1 FROM message_deletions md1 
+					JOIN conversations c ON m.conversation_id = c.id
+					WHERE md1.message_id = m.id AND md1.user_id = c.user1_id
+					AND md1.deleted_at < CURRENT_DATE - INTERVAL '3 months'
+				)
+				AND EXISTS (
+					SELECT 1 FROM message_deletions md2 
+					JOIN conversations c ON m.conversation_id = c.id
+					WHERE md2.message_id = m.id AND md2.user_id = c.user2_id
+					AND md2.deleted_at < CURRENT_DATE - INTERVAL '3 months'
+				)
+			`);
+
+			// 4. Clean empty conversations
+			const result4 = await client.query(`
+				DELETE FROM conversations 
+				WHERE NOT EXISTS (SELECT 1 FROM messages WHERE conversation_id = conversations.id)
+				AND created_at < CURRENT_DATE - INTERVAL '3 months'
+			`);
+
+			await client.query('COMMIT');
+
+			return {
+				orphaned_messages: result1.rowCount,
+				double_deleted: result2.rowCount,
+				empty_conversations: result4.rowCount,
+			};
+		} catch (error) {
+			await client.query('ROLLBACK');
+			throw error;
+		} finally {
+			client.release();
 		}
 	}
 }

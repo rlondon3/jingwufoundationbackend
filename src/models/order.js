@@ -105,19 +105,19 @@ class OrderStore {
 
 			const coursePrice = courseRes.rows[0].regular_price;
 
-			// Check if user already purchased this course
-			const existingSql = `
-        SELECT id FROM orders 
-        WHERE user_id = $1 AND course_id = $2 AND order_status = 'completed'
+			// Check if user is currently enrolled in this course
+			const enrollmentSql = `
+        SELECT id FROM user_courses 
+        WHERE user_id = $1 AND course_id = $2
       `;
-			const existingRes = await client.query(existingSql, [
+			const enrollmentRes = await client.query(enrollmentSql, [
 				order.user_id,
 				order.course_id,
 			]);
 
-			if (existingRes.rows.length > 0) {
+			if (enrollmentRes.rows.length > 0) {
 				client.release();
-				throw new Error('User has already purchased this course');
+				throw new Error('User is already enrolled in this course');
 			}
 
 			// Create order with Stripe integration
@@ -186,8 +186,12 @@ class OrderStore {
 	 * Complete order from Stripe webhook
 	 */
 	async completeFromStripe(checkoutSessionId, stripePaymentIntentId = null) {
+		const client = await this.pool.connect();
 		try {
-			const sql = `
+			await client.query('BEGIN');
+
+			// Update order status
+			const orderSql = `
         UPDATE orders SET 
           order_status = 'completed',
           stripe_payment_intent_id = COALESCE($2, stripe_payment_intent_id),
@@ -196,20 +200,44 @@ class OrderStore {
           notes = 'Payment completed via Stripe'
         WHERE stripe_checkout_session_id = $1 RETURNING *
       `;
-			const client = await this.pool.connect();
-			const res = await client.query(sql, [
+			const orderRes = await client.query(orderSql, [
 				checkoutSessionId,
 				stripePaymentIntentId,
 			]);
-			client.release();
 
-			if (res.rows.length === 0) {
+			if (orderRes.rows.length === 0) {
 				throw new Error('Order not found for Stripe session');
 			}
 
-			return res.rows[0];
+			const completedOrder = orderRes.rows[0];
+
+			// Enroll user in course - simplified direct approach
+			console.log(`Attempting to enroll user ${completedOrder.user_id} in course ${completedOrder.course_id}`);
+			
+			const enrollmentSql = `
+        INSERT INTO user_courses (user_id, course_id, start_date, progress) 
+        VALUES ($1, $2, CURRENT_TIMESTAMP, 0) 
+        ON CONFLICT (user_id, course_id) DO UPDATE SET 
+          start_date = CURRENT_TIMESTAMP,
+          progress = 0
+        RETURNING *
+      `;
+			const enrollmentRes = await client.query(enrollmentSql, [
+				completedOrder.user_id,
+				completedOrder.course_id,
+			]);
+
+			console.log(`Enrollment result:`, enrollmentRes.rows[0]);
+			console.log(`User ${completedOrder.user_id} enrolled in course ${completedOrder.course_id} after payment completion`);
+
+			await client.query('COMMIT');
+			
+			return completedOrder;
 		} catch (error) {
+			await client.query('ROLLBACK');
 			throw new Error(`Could not complete order from Stripe: ${error}`);
+		} finally {
+			client.release();
 		}
 	}
 

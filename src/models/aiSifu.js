@@ -48,6 +48,7 @@ class AISifuStore {
 	 */
 	async canUserAsk(userId, courseId = null) {
 		try {
+			console.log('Checking access for user:', userId, 'courseId:', courseId, 'courseId type:', typeof courseId);
 			const client = await this.pool.connect();
 
 			// Get user info
@@ -94,15 +95,24 @@ class AISifuStore {
 				return { canAsk: true, reason: 'subscription_access' };
 			}
 
-			// Check course purchase access
+			// Check course access (purchase OR enrollment)
 			if (courseId) {
+				// Check if user purchased the specific course
 				const purchaseSql = `
           SELECT id FROM orders 
           WHERE user_id = $1 AND course_id = $2 AND order_status = 'completed'
         `;
 				const purchaseRes = await client.query(purchaseSql, [userId, courseId]);
 
-				if (purchaseRes.rows.length > 0) {
+				// Also check if user is enrolled in the specific course
+				const enrollmentSql = `
+          SELECT id FROM user_courses 
+          WHERE user_id = $1 AND course_id = $2
+        `;
+				const enrollmentRes = await client.query(enrollmentSql, [userId, courseId]);
+
+				// User has access if they purchased OR are enrolled in this specific course
+				if (purchaseRes.rows.length > 0 || enrollmentRes.rows.length > 0) {
 					const courseUsage = usage.course_purchases_usage[courseId] || 0;
 					if (courseUsage >= 10) {
 						client.release();
@@ -115,7 +125,41 @@ class AISifuStore {
 						};
 					}
 					client.release();
-					return { canAsk: true, reason: 'course_purchase_access' };
+					return { 
+						canAsk: true, 
+						reason: purchaseRes.rows.length > 0 ? 'course_purchase_access' : 'course_enrollment_access' 
+					};
+				}
+			} else {
+				// No specific course ID provided - check if user has access to ANY course
+				const anyPurchaseSql = `
+          SELECT DISTINCT course_id FROM orders 
+          WHERE user_id = $1 AND order_status = 'completed'
+          LIMIT 1
+        `;
+				const anyPurchaseRes = await client.query(anyPurchaseSql, [userId]);
+
+				const anyEnrollmentSql = `
+          SELECT DISTINCT course_id FROM user_courses 
+          WHERE user_id = $1
+          LIMIT 1
+        `;
+				const anyEnrollmentRes = await client.query(anyEnrollmentSql, [userId]);
+
+				console.log('General access check results:', {
+					userId,
+					anyPurchases: anyPurchaseRes.rows.length,
+					anyEnrollments: anyEnrollmentRes.rows.length,
+					enrollmentRows: anyEnrollmentRes.rows
+				});
+
+				// User has general access if they have ANY course purchase OR enrollment
+				if (anyPurchaseRes.rows.length > 0 || anyEnrollmentRes.rows.length > 0) {
+					client.release();
+					return { 
+						canAsk: true, 
+						reason: anyPurchaseRes.rows.length > 0 ? 'general_course_purchase_access' : 'general_course_enrollment_access' 
+					};
 				}
 			}
 

@@ -25,19 +25,24 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
  */
 const createCheckout = async (req, res) => {
 	try {
-		const { price_id, success_url, cancel_url, mode, course_id } = req.body;
+		const { price_id, success_url, cancel_url, mode, course_id, course_price } = req.body;
 		const userId = req.user.id;
 
 		if (!userId) {
 			return res.status(400).json({ error: 'User ID not found in token' });
 		}
 
-		if (!price_id || !success_url || !cancel_url || !mode) {
+		if (!success_url || !cancel_url || !mode) {
 			return res.status(400).json({ error: 'Missing required parameters' });
 		}
 
 		if (!['payment', 'subscription'].includes(mode)) {
 			return res.status(400).json({ error: 'Invalid mode' });
+		}
+
+		// For course purchases, we need either a price_id or course_id + course_price
+		if (mode === 'payment' && !price_id && (!course_id || !course_price)) {
+			return res.status(400).json({ error: 'For course purchases, provide either price_id or course_id + course_price' });
 		}
 
 		// Initialize stores
@@ -65,19 +70,63 @@ const createCheckout = async (req, res) => {
 			customerId = stripeCustomer.customer_id;
 		}
 
-		// Create checkout session
-		const session = await stripe.checkout.sessions.create({
-			customer: customerId,
-			payment_method_types: ['card'],
-			line_items: [
+		let lineItems;
+
+		if (price_id) {
+			// Use existing Stripe price
+			lineItems = [
 				{
 					price: price_id,
 					quantity: 1,
 				},
-			],
+			];
+		} else if (course_price) {
+			// Get course details for better product naming
+			let courseName = `Course ${course_id}`;
+			try {
+				const courseQuery = await req.app.locals.pool.query(
+					'SELECT title FROM courses WHERE id = $1',
+					[course_id]
+				);
+				if (courseQuery.rows.length > 0) {
+					courseName = courseQuery.rows[0].title;
+				}
+			} catch (error) {
+				console.error('Error fetching course title:', error);
+				// Continue with default name
+			}
+
+			// Create dynamic price for course
+			lineItems = [
+				{
+					price_data: {
+						currency: 'usd',
+						product_data: {
+							name: courseName,
+							description: `Access to ${courseName} course content`,
+							metadata: {
+								course_id: course_id.toString(),
+							},
+						},
+						unit_amount: Math.round(course_price * 100), // Convert to cents
+					},
+					quantity: 1,
+				},
+			];
+		}
+
+		// Create checkout session
+		const session = await stripe.checkout.sessions.create({
+			customer: customerId,
+			payment_method_types: ['card'],
+			line_items: lineItems,
 			mode,
 			success_url,
 			cancel_url,
+			metadata: {
+				course_id: course_id?.toString() || '',
+				user_id: userId.toString(),
+			},
 		});
 
 		const orderStore = new OrderStore(req.app.locals.pool);
@@ -179,6 +228,57 @@ const getOrders = async (req, res) => {
 	} catch (error) {
 		console.error('Get orders error:', error);
 		res.status(500).json({ error: 'Failed to get orders' });
+	}
+};
+
+/**
+ * Verify payment success and complete enrollment
+ * POST /stripe/verify-payment
+ */
+const verifyPayment = async (req, res) => {
+	try {
+		const { session_id, course_id } = req.body;
+		const userId = req.user.id;
+
+		if (!session_id) {
+			return res.status(400).json({ error: 'Session ID required' });
+		}
+
+		// Get session details from Stripe
+		const session = await stripe.checkout.sessions.retrieve(session_id);
+		
+		if (session.payment_status === 'paid' && session.metadata.user_id == userId) {
+			// Payment was successful, complete the order
+			const orderStore = new OrderStore(req.app.locals.pool);
+			
+			try {
+				const completedOrder = await orderStore.completeFromStripe(
+					session_id,
+					session.payment_intent
+				);
+
+				console.log(`Payment verified and order completed for session: ${session_id}`);
+				
+				return res.json({ 
+					success: true, 
+					order_id: completedOrder.id,
+					enrolled: true 
+				});
+			} catch (error) {
+				// Order might already be completed
+				console.log('Order completion error (possibly already completed):', error.message);
+				return res.json({ 
+					success: true, 
+					message: 'Payment already processed',
+					enrolled: true 
+				});
+			}
+		} else {
+			return res.status(400).json({ error: 'Payment not completed or user mismatch' });
+		}
+	} catch (error) {
+		console.error('Payment verification error:', error);
+		res.status(500).json({ error: 'Failed to verify payment' });
 	}
 };
 
@@ -324,6 +424,7 @@ const stripe_route = (app) => {
 
 	// Protected routes
 	app.post('/stripe/create-checkout', authenticationToken, createCheckout);
+	app.post('/stripe/verify-payment', authenticationToken, verifyPayment);
 	app.get('/stripe/subscription/:userId', authenticateUserId, getSubscription);
 	app.get('/stripe/orders/:userId', authenticateUserId, getOrders);
 };

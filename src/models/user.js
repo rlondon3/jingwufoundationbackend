@@ -17,6 +17,10 @@ class UserStore {
 			client.release();
 			return res.rows;
 		} catch (error) {
+			// Ensure client is released even if an error occurs
+			if (client) {
+				client.release();
+			}
 			throw new Error(`Can't retrieve users: ${error}`);
 		}
 	}
@@ -29,6 +33,10 @@ class UserStore {
 			client.release();
 			return res.rows[0];
 		} catch (error) {
+			// Ensure client is released even if an error occurs
+			if (client) {
+				client.release();
+			}
 			throw new Error(`Can't find user: ${error}`);
 		}
 	}
@@ -321,6 +329,23 @@ class UserStore {
 		}
 	}
 
+	async unenrollUserFromCourse(userId, courseId) {
+		try {
+			const sql = `
+				DELETE FROM user_courses 
+				WHERE user_id = $1 AND course_id = $2 
+				RETURNING *
+			`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [userId, courseId]);
+			client.release();
+			return res.rows[0] || null;
+		} catch (error) {
+			throw new Error(`Could not unenroll user from course: ${error}`);
+		}
+	}
+
 	async updateCourseProgress(userId, courseId, progress) {
 		try {
 			const sql = `
@@ -356,9 +381,10 @@ class UserStore {
 	}
 
 	async authenticate(username, password) {
+		let client;
 		try {
 			const sql = 'SELECT * FROM users WHERE username=($1)';
-			const client = await this.pool.connect();
+			client = await this.pool.connect();
 			const res = await client.query(sql, [username]);
 
 			if (res.rows.length) {
@@ -375,6 +401,10 @@ class UserStore {
 				return null;
 			}
 		} catch (error) {
+			// Ensure client is released even if an error occurs
+			if (client) {
+				client.release();
+			}
 			throw new Error(`Could not authenticate: ${error}`);
 		}
 	}

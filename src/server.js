@@ -10,12 +10,18 @@ const stripeRoute = require('./handlers/stripe');
 const ordersRoute = require('./handlers/orders');
 const messagesRoute = require('./handlers/messages');
 const news_route = require('./handlers/news');
+const resources_route = require('./handlers/resources');
 const ai_sifu_route = require('./handlers/aiSifu');
+const ai_conversations_route = require('./handlers/aiSIfuHistories');
+const student_notes_route = require('./handlers/studentNotes');
 const health_route = require('./handlers/health');
+const reviews_route = require('./handlers/reviews');
+const bookings_route = require('./handlers/bookings');
+const classes_route = require('./handlers/classes');
 const cloudinary_routes = require('./handlers/cloudinary');
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3002;
 const address = `localhost:${PORT}`;
 
 // Database connection
@@ -45,27 +51,56 @@ const testConnection = async () => {
 // CORS configuration
 const corsOptions = {
 	origin: [
-		'http://localhost:3000',
+		'http://localhost:3002',
 		'http://localhost:5173',
 		'http://127.0.0.1:5173',
 	], //change to your frontend URL in production
 	credentials: true,
 	methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-	allowedHeaders: ['Content-Type', 'Authorization'],
+	allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+	optionsSuccessStatus: 200,
 };
 
-// app.options('*', cors(corsOptions));
-
-app.use('/stripe/webhook', express.raw({ type: 'application/json' }));
 // Middleware
 app.use(helmet());
 app.use(morgan('dev'));
-app.use(cors(corsOptions));
+// Express 5.0 compatible CORS setup
+app.use((req, res, next) => {
+	const origin = req.headers.origin;
+	const allowedOrigins = [
+		'http://localhost:3002',
+		'http://localhost:5173',
+		'http://127.0.0.1:5173',
+	];
+
+	if (allowedOrigins.includes(origin)) {
+		res.setHeader('Access-Control-Allow-Origin', origin);
+	}
+
+	res.setHeader('Access-Control-Allow-Credentials', 'true');
+	res.setHeader(
+		'Access-Control-Allow-Methods',
+		'GET, POST, PUT, DELETE, OPTIONS'
+	);
+	res.setHeader(
+		'Access-Control-Allow-Headers',
+		'Content-Type, Authorization, X-Requested-With'
+	);
+
+	if (req.method === 'OPTIONS') {
+		res.status(200).end();
+		return;
+	}
+
+	next();
+});
+
+app.use('/stripe/webhook', express.raw({ type: 'application/json' }));
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 // Main route
-app.get('/', function (req, res) {
+app.get('/', function (_req, res) {
 	res.json({
 		message: 'Welcome to JingWu Foundation API',
 		status: 'Server is running!',
@@ -81,7 +116,13 @@ stripeRoute(app);
 ordersRoute(app);
 messagesRoute(app);
 news_route(app);
+resources_route(app);
+reviews_route(app);
 ai_sifu_route(app);
+ai_conversations_route(app);
+student_notes_route(app);
+bookings_route(app);
+classes_route(app);
 cloudinary_routes(app);
 
 // Error handling for unhandled promise rejections

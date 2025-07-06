@@ -281,15 +281,28 @@ const users_route = (app) => {
 	 */
 	const getUserProfile = async (req, res) => {
 		try {
-			const user = await store.getUserWithPrivacy(parseInt(req.params.id));
+			const userId = parseInt(req.params.id);
+			const user = await store.getUserWithPrivacy(userId);
 			if (!user) {
 				return res.status(404).json({ error: 'User not found' });
 			}
 
+			// Get user's enrolled courses
+			const userCourses = await store.getUserCourses(userId);
+			
 			// Remove sensitive data
 			delete user.password;
 
-			return res.status(200).json(user);
+			// Extract course IDs from enrollment objects for frontend compatibility
+			const courseIds = userCourses ? userCourses.map(enrollment => enrollment.course_id) : [];
+
+			// Add enrolled courses to user object
+			const userWithCourses = {
+				...user,
+				current_courses: courseIds
+			};
+
+			return res.status(200).json(userWithCourses);
 		} catch (error) {
 			console.error('Get user profile error:', error);
 			return res.status(500).json({ error: 'Failed to get user profile' });
@@ -457,6 +470,37 @@ const users_route = (app) => {
 		}
 	};
 
+	const unenrollFromCourse = async (req, res) => {
+		const { id: userId, courseId } = req.params;
+
+		try {
+			// Check if user is enrolled
+			const isEnrolled = await store.isUserEnrolled(
+				parseInt(userId),
+				parseInt(courseId)
+			);
+
+			if (!isEnrolled) {
+				return res
+					.status(400)
+					.json({ error: 'User is not enrolled in this course' });
+			}
+
+			const result = await store.unenrollUserFromCourse(
+				parseInt(userId),
+				parseInt(courseId)
+			);
+
+			return res.status(200).json({
+				message: 'Successfully unenrolled from course',
+				result,
+			});
+		} catch (error) {
+			console.error('Unenrollment error:', error);
+			return res.status(500).json({ error: 'Failed to unenroll from course' });
+		}
+	};
+
 	/**
 	 * Get user's lesson completion status for a course
 	 * GET /user/:id/course/:courseId/lessons/progress
@@ -552,6 +596,7 @@ const users_route = (app) => {
 	app.get('/user/:id/enrollment/:courseId', authenticateUserId, getEnrollment);
 	app.get('/user/:id/enrolled/:courseId', authenticateUserId, checkEnrollment);
 	app.post('/user/:id/enroll/:courseId', authenticateUserId, enrollInCourse);
+	app.delete('/user/:id/enroll/:courseId', authenticateUserId, unenrollFromCourse);
 };
 
 module.exports = users_route;
