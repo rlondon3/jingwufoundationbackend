@@ -1,13 +1,5 @@
 {
-	"defaultEnv": { "ENV": "NODE_ENV" },
-	"dev": {
-		"driver": "pg",
-		"ENV": "DATABASE_URL"
-	},
-	"development": {
-		"driver": "pg",
-		"ENV": "DATABASE_URL"
-	},
+	"defaultEnv": "prod",
 	"production": {
 		"driver": "pg",
 		"ENV": "DATABASE_URL"
