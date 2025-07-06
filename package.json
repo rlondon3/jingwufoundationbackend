@@ -5,7 +5,9 @@
 	"main": "src/server.js",
 	"scripts": {
 		"dev": "nodemon src/server.js",
-		"start": "node src/server.js"
+		"start": "pnpm run migrate:up && node src/server.js",
+		"migrate:up": "db-migrate up",
+		"migrate:down": "db-migrate down"
 	},
 	"keywords": [],
 	"author": "",
