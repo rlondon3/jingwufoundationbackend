@@ -22,7 +22,7 @@ const cloudinary_routes = require('./handlers/cloudinary');
 const password_reset_route = require('./handlers/passwordReset');
 
 const app = express();
-const PORT = process.env.PORT || 3002;
+const PORT = process.env.PORT || 3000;
 const address = `localhost:${PORT}`;
 
 // Database connection
@@ -47,19 +47,6 @@ const testConnection = async () => {
 		console.error('❌ Full error:', err);
 		console.error('❌ Server will continue but database operations will fail');
 	}
-};
-
-// CORS configuration
-const corsOptions = {
-	origin: [
-		'http://localhost:3002',
-		'http://localhost:5173',
-		'http://127.0.0.1:5173',
-	], //change to your frontend URL in production
-	credentials: true,
-	methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-	allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-	optionsSuccessStatus: 200,
 };
 
 // Middleware
