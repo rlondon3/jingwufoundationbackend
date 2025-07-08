@@ -56,7 +56,7 @@ app.use(morgan('dev'));
 app.use((req, res, next) => {
 	const origin = req.headers.origin;
 	const allowedOrigins = [
-		'http://localhost:3002',
+		'http://localhost:3000',
 		'http://localhost:5173',
 		'http://127.0.0.1:5173',
 		'https://jingwupai.org',
@@ -74,7 +74,7 @@ app.use((req, res, next) => {
 	);
 	res.setHeader(
 		'Access-Control-Allow-Headers',
-		'Content-Type, Authorization, X-Requested-With'
+		'Content-Type, Authorization, X-Requested-With, authorization'
 	);
 
 	if (req.method === 'OPTIONS') {

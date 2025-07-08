@@ -637,7 +637,7 @@ function validateCourse(course) {
 			.required(),
 		language: Joi.string().default('English'),
 		estimated_hours: Joi.number().positive().required(),
-		regular_price: Joi.number().positive().required(),
+		regular_price: Joi.number().min(0).required(),
 		prerequisites: Joi.string().allow(''),
 		learning_objectives: Joi.string().required(),
 		is_published: Joi.boolean().default(true),
