@@ -386,13 +386,21 @@ class UserStore {
 			const res = await client.query(sql, [username]);
 
 			if (res.rows.length) {
+				const user = res.rows[0];
+				
+				// Check if account is active
+				if (!user.is_active) {
+					client.release();
+					throw new Error('Account has been deactivated. Please contact support for reactivation.');
+				}
+				
 				const isValid = bcrypt.compareSync(
 					password + `${PEPPER}`,
-					res.rows[0].password
+					user.password
 				);
 				if (isValid) {
 					client.release();
-					return res.rows[0];
+					return user;
 				}
 			} else {
 				client.release();
@@ -482,6 +490,24 @@ class UserStore {
 			return 0;
 		} catch (error) {
 			throw new Error(`Could not calculate course progress: ${error}`);
+		}
+	}
+
+	async updateUserStatus(userId, isActive) {
+		try {
+			const sql = `
+				UPDATE users 
+				SET is_active = $2, updated_at = CURRENT_TIMESTAMP 
+				WHERE id = $1 
+				RETURNING id, name, email, username, is_admin, is_active
+			`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [userId, isActive]);
+			client.release();
+			return res.rows[0];
+		} catch (error) {
+			throw new Error(`Could not update user status: ${error}`);
 		}
 	}
 }

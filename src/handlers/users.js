@@ -550,6 +550,64 @@ const users_route = (app) => {
 		}
 	};
 
+	/**
+	 * Deactivate user account
+	 * POST /user/:id/deactivate - requires user ID authentication
+	 */
+	const deactivateAccount = async (req, res) => {
+		const userId = parseInt(req.params.id);
+
+		try {
+			const updatedUser = await store.updateUserStatus(userId, false);
+			
+			if (!updatedUser) {
+				return res.status(404).json({ error: 'User not found' });
+			}
+
+			return res.status(200).json({
+				message: 'Account deactivated successfully',
+				user: {
+					id: updatedUser.id,
+					name: updatedUser.name,
+					email: updatedUser.email,
+					is_active: updatedUser.is_active,
+				},
+			});
+		} catch (error) {
+			console.error('Deactivate account error:', error);
+			return res.status(500).json({ error: 'Failed to deactivate account' });
+		}
+	};
+
+	/**
+	 * Reactivate user account (admin only)
+	 * POST /admin/user/:id/reactivate - requires admin authentication
+	 */
+	const reactivateAccount = async (req, res) => {
+		const userId = parseInt(req.params.id);
+
+		try {
+			const updatedUser = await store.updateUserStatus(userId, true);
+			
+			if (!updatedUser) {
+				return res.status(404).json({ error: 'User not found' });
+			}
+
+			return res.status(200).json({
+				message: 'Account reactivated successfully',
+				user: {
+					id: updatedUser.id,
+					name: updatedUser.name,
+					email: updatedUser.email,
+					is_active: updatedUser.is_active,
+				},
+			});
+		} catch (error) {
+			console.error('Reactivate account error:', error);
+			return res.status(500).json({ error: 'Failed to reactivate account' });
+		}
+	};
+
 	// Import authentication middleware
 	const {
 		authenticationToken,
@@ -597,6 +655,10 @@ const users_route = (app) => {
 	app.get('/user/:id/enrolled/:courseId', authenticateUserId, checkEnrollment);
 	app.post('/user/:id/enroll/:courseId', authenticateUserId, enrollInCourse);
 	app.delete('/user/:id/enroll/:courseId', authenticateUserId, unenrollFromCourse);
+
+	// Account status routes
+	app.post('/user/:id/deactivate', authenticateUserId, deactivateAccount);
+	app.post('/admin/user/:id/reactivate', authenticationToken, requireAdmin, reactivateAccount);
 };
 
 module.exports = users_route;

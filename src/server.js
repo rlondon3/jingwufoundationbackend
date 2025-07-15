@@ -20,6 +20,7 @@ const bookings_route = require('./handlers/bookings');
 const classes_route = require('./handlers/classes');
 const cloudinary_routes = require('./handlers/cloudinary');
 const password_reset_route = require('./handlers/passwordReset');
+const terms_route = require('./handlers/termsOfService');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -48,6 +49,9 @@ const testConnection = async () => {
 		console.error('❌ Server will continue but database operations will fail');
 	}
 };
+
+// Trust proxy for accurate IP address detection
+app.set('trust proxy', true);
 
 // Middleware
 app.use(helmet());
@@ -115,6 +119,7 @@ bookings_route(app);
 classes_route(app);
 cloudinary_routes(app);
 password_reset_route(app);
+terms_route(app);
 
 // Error handling for unhandled promise rejections
 process.on('unhandledRejection', (reason, promise) => {

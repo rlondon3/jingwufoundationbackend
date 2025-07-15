@@ -25,6 +25,12 @@ class PasswordResetStore {
 
 			const user = userRes.rows[0];
 
+			// Check if user account is active
+			if (user.is_active === false) {
+				client.release();
+				return { success: false, message: 'Account is deactivated. Please contact support.' };
+			}
+
 			// Verify security answers using existing user data
 			const isValid = this.verifySecurityAnswers(user, securityAnswers);
 
@@ -95,7 +101,7 @@ class PasswordResetStore {
 					prr.is_used
 				FROM users u
 				JOIN password_reset_requests prr ON u.id = prr.user_id
-				WHERE u.username = $1 AND prr.is_used = false AND prr.expires_at > CURRENT_TIMESTAMP
+				WHERE u.username = $1 AND u.is_active = true AND prr.is_used = false AND prr.expires_at > CURRENT_TIMESTAMP
 			`;
 
 			client = await this.pool.connect();
@@ -247,7 +253,7 @@ class PasswordResetStore {
 	async getSecurityQuestions(email) {
 		let client;
 		try {
-			const sql = 'SELECT username, city, country FROM users WHERE email = $1';
+			const sql = 'SELECT username, city, country, is_active FROM users WHERE email = $1';
 			client = await this.pool.connect();
 			const res = await client.query(sql, [email]);
 			client.release();
@@ -265,6 +271,19 @@ class PasswordResetStore {
 			}
 
 			const user = res.rows[0];
+
+			// Check if user account is active
+			if (user.is_active === false) {
+				// Return generic questions to avoid revealing account status
+				return {
+					questions: [
+						'What is your username?',
+						'What city are you in?',
+						'What country are you in?',
+					],
+					found: false,
+				};
+			}
 			return {
 				questions: [
 					'What is your username?',
