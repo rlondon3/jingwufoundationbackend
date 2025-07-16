@@ -36,7 +36,7 @@ class ClassesStore {
 
 			client = await this.pool.connect();
 			const res = await client.query(sql);
-			
+
 			// Get sessions for each class
 			const classes = res.rows;
 			for (let classItem of classes) {
@@ -58,7 +58,7 @@ class ClassesStore {
 				const sessionsRes = await client.query(sessionsQuery, [classItem.id]);
 				classItem.sessions = sessionsRes.rows;
 			}
-			
+
 			client.release();
 			return classes;
 		} catch (error) {
@@ -102,7 +102,7 @@ class ClassesStore {
 
 			client = await this.pool.connect();
 			const res = await client.query(sql, [id]);
-			
+
 			if (res.rows.length === 0) {
 				client.release();
 				return null;
@@ -148,15 +148,15 @@ class ClassesStore {
 			client = await this.pool.connect();
 			await client.query('BEGIN');
 
-			// Create the main class (without day_of_week, start_time, end_time)
+			// Create the main class (including video_embed_url)
 			const sql = `
-        INSERT INTO classes (
-          class_name, description, instructor_name, location, class_type, 
-          skill_focus, class_duration, max_capacity, price, age_restrictions, 
-          requires_membership, waitlist_enabled, is_published
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-        RETURNING *
-      `;
+				INSERT INTO classes (
+					class_name, description, instructor_name, location, class_type, 
+					skill_focus, class_duration, max_capacity, price, age_restrictions, 
+					requires_membership, waitlist_enabled, is_published, video_embed_url
+				) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+				RETURNING *
+			`;
 
 			const res = await client.query(sql, [
 				classData.class_name,
@@ -172,6 +172,7 @@ class ClassesStore {
 				classData.requires_membership || false,
 				classData.waitlist_enabled || true,
 				classData.is_published || false,
+				classData.video_embed_url || null,
 			]);
 
 			const newClass = res.rows[0];
@@ -188,9 +189,9 @@ class ClassesStore {
 			// Insert sessions
 			for (const session of sessions) {
 				const sessionSql = `
-          INSERT INTO class_sessions (class_id, day_of_week, start_time, end_time)
-          VALUES ($1, $2, $3, $4)
-        `;
+					INSERT INTO class_sessions (class_id, day_of_week, start_time, end_time)
+					VALUES ($1, $2, $3, $4)
+				`;
 				await client.query(sessionSql, [
 					newClass.id,
 					session.day_of_week,
@@ -213,24 +214,23 @@ class ClassesStore {
 		}
 	}
 
-	/**
-	 * Update existing class with sessions
-	 */
+	// Updated updateClass method to include video_embed_url
 	async updateClass(classData, id) {
 		let client;
 		try {
 			client = await this.pool.connect();
 			await client.query('BEGIN');
 
-			// Update the main class (without day_of_week, start_time, end_time)
+			// Update the main class (including video_embed_url)
 			const sql = `
-        UPDATE classes SET 
-          class_name = $1, description = $2, instructor_name = $3, location = $4,
-          class_type = $5, skill_focus = $6, class_duration = $7, max_capacity = $8, 
-          price = $9, age_restrictions = $10, requires_membership = $11, 
-          waitlist_enabled = $12, is_published = $13, updated_at = CURRENT_TIMESTAMP
-        WHERE id = $14 RETURNING *
-      `;
+				UPDATE classes SET 
+					class_name = $1, description = $2, instructor_name = $3, location = $4,
+					class_type = $5, skill_focus = $6, class_duration = $7, max_capacity = $8, 
+					price = $9, age_restrictions = $10, requires_membership = $11, 
+					waitlist_enabled = $12, is_published = $13, video_embed_url = $14, 
+					updated_at = CURRENT_TIMESTAMP
+				WHERE id = $15 RETURNING *
+			`;
 
 			const res = await client.query(sql, [
 				classData.class_name,
@@ -246,20 +246,23 @@ class ClassesStore {
 				classData.requires_membership,
 				classData.waitlist_enabled,
 				classData.is_published,
+				classData.video_embed_url || null,
 				id,
 			]);
 
 			// Handle sessions update
 			if (classData.sessions) {
 				// Delete existing sessions
-				await client.query('DELETE FROM class_sessions WHERE class_id = $1', [id]);
+				await client.query('DELETE FROM class_sessions WHERE class_id = $1', [
+					id,
+				]);
 
 				// Insert new sessions
 				for (const session of classData.sessions) {
 					const sessionSql = `
-            INSERT INTO class_sessions (class_id, day_of_week, start_time, end_time)
-            VALUES ($1, $2, $3, $4)
-          `;
+						INSERT INTO class_sessions (class_id, day_of_week, start_time, end_time)
+						VALUES ($1, $2, $3, $4)
+					`;
 					await client.query(sessionSql, [
 						id,
 						session.day_of_week,
@@ -267,13 +270,19 @@ class ClassesStore {
 						session.end_time,
 					]);
 				}
-			} else if (classData.day_of_week && classData.start_time && classData.end_time) {
+			} else if (
+				classData.day_of_week &&
+				classData.start_time &&
+				classData.end_time
+			) {
 				// Handle old format - single session
-				await client.query('DELETE FROM class_sessions WHERE class_id = $1', [id]);
+				await client.query('DELETE FROM class_sessions WHERE class_id = $1', [
+					id,
+				]);
 				const sessionSql = `
-          INSERT INTO class_sessions (class_id, day_of_week, start_time, end_time)
-          VALUES ($1, $2, $3, $4)
-        `;
+					INSERT INTO class_sessions (class_id, day_of_week, start_time, end_time)
+					VALUES ($1, $2, $3, $4)
+				`;
 				await client.query(sessionSql, [
 					id,
 					classData.day_of_week,
@@ -586,7 +595,9 @@ class ClassesStore {
 				[classId]
 			);
 
-			const currentCount = parseInt(userCountRes.rows[0].count) + parseInt(manualCountRes.rows[0].count);
+			const currentCount =
+				parseInt(userCountRes.rows[0].count) +
+				parseInt(manualCountRes.rows[0].count);
 
 			if (currentCount >= classInfo.max_capacity) {
 				client.release();
@@ -643,7 +654,7 @@ class ClassesStore {
 
 			client = await this.pool.connect();
 			const res = await client.query(sql);
-			
+
 			// Get sessions for each class
 			const classes = res.rows;
 			for (let classItem of classes) {
@@ -665,7 +676,7 @@ class ClassesStore {
 				const sessionsRes = await client.query(sessionsQuery, [classItem.id]);
 				classItem.sessions = sessionsRes.rows;
 			}
-			
+
 			client.release();
 			return classes;
 		} catch (error) {
@@ -682,7 +693,7 @@ class ClassesStore {
 	async getClassEnrollments(classId) {
 		try {
 			const client = await this.pool.connect();
-			
+
 			// Get user enrollments
 			const userEnrollmentsSql = `
         SELECT 
@@ -695,7 +706,7 @@ class ClassesStore {
         WHERE ce.class_id = $1 AND ce.status = 'enrolled'
         ORDER BY ce.enrolled_at
       `;
-			
+
 			// Get manual enrollments
 			const manualEnrollmentsSql = `
         SELECT 
@@ -710,13 +721,15 @@ class ClassesStore {
 
 			const userRes = await client.query(userEnrollmentsSql, [classId]);
 			const manualRes = await client.query(manualEnrollmentsSql, [classId]);
-			
+
 			client.release();
-			
+
 			// Combine and sort by enrollment date
 			const allEnrollments = [...userRes.rows, ...manualRes.rows];
-			allEnrollments.sort((a, b) => new Date(a.enrolled_at) - new Date(b.enrolled_at));
-			
+			allEnrollments.sort(
+				(a, b) => new Date(a.enrolled_at) - new Date(b.enrolled_at)
+			);
+
 			return allEnrollments;
 		} catch (error) {
 			throw new Error(`Could not get class enrollments: ${error}`);
@@ -811,23 +824,28 @@ function validateClass(classData) {
 			.valid('beginner', 'intermediate', 'advanced', 'open_level')
 			.required(),
 		skill_focus: Joi.string().min(1).max(100).required(),
+		// Video embed URL for YouTube/Vimeo etc.
+		video_embed_url: Joi.string().allow('', null).pattern(/^https?:\/\/.+/).messages({
+			'string.pattern.base': 'Video embed URL must be a valid HTTP/HTTPS URL',
+		}),
 		// Multiple sessions support (new format)
 		sessions: Joi.array().items(sessionSchema).min(1),
 		// Legacy single session fields (backwards compatibility)
-		day_of_week: Joi.string()
-			.valid(
-				'monday',
-				'tuesday',
-				'wednesday',
-				'thursday',
-				'friday',
-				'saturday',
-				'sunday'
-			),
-		start_time: Joi.string()
-			.pattern(/^([0-1]?[0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$/), // HH:MM or HH:MM:SS format
-		end_time: Joi.string()
-			.pattern(/^([0-1]?[0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$/),
+		day_of_week: Joi.string().valid(
+			'monday',
+			'tuesday',
+			'wednesday',
+			'thursday',
+			'friday',
+			'saturday',
+			'sunday'
+		),
+		start_time: Joi.string().pattern(
+			/^([0-1]?[0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$/
+		), // HH:MM or HH:MM:SS format
+		end_time: Joi.string().pattern(
+			/^([0-1]?[0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$/
+		),
 		class_duration: Joi.number().integer().min(15).max(300).required(), // 15 minutes to 5 hours
 		max_capacity: Joi.number().integer().min(1).max(100).required(),
 		price: Joi.number().min(0).precision(2).required(),
@@ -836,8 +854,8 @@ function validateClass(classData) {
 		waitlist_enabled: Joi.boolean().default(true),
 		is_published: Joi.boolean().default(false),
 	})
-	// Require either sessions array OR legacy single session fields
-	.or('sessions', 'day_of_week');
+		// Require either sessions array OR legacy single session fields
+		.or('sessions', 'day_of_week');
 
 	return classSchema.validate(classData);
 }

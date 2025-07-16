@@ -21,6 +21,7 @@ const classes_route = require('./handlers/classes');
 const cloudinary_routes = require('./handlers/cloudinary');
 const password_reset_route = require('./handlers/passwordReset');
 const terms_route = require('./handlers/termsOfService');
+const blog_route = require('./handlers/blogs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -120,6 +121,7 @@ classes_route(app);
 cloudinary_routes(app);
 password_reset_route(app);
 terms_route(app);
+blog_route(app);
 
 // Error handling for unhandled promise rejections
 process.on('unhandledRejection', (reason, promise) => {
