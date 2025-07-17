@@ -223,16 +223,15 @@ class CourseStore {
 	async updateModule(module, id) {
 		try {
 			const sql = `
-        UPDATE modules SET 
-          title=$1, description=$2, order_sequence=$3, updated_at=CURRENT_TIMESTAMP
-        WHERE id=$4 RETURNING *
-      `;
+			UPDATE modules SET 
+			  title=$1, description=$2, updated_at=CURRENT_TIMESTAMP
+			WHERE id=$3 RETURNING *
+		  `;
 
 			const client = await this.pool.connect();
 			const res = await client.query(sql, [
 				module.title,
 				module.description,
-				module.order_sequence,
 				id,
 			]);
 
