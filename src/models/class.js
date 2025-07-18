@@ -320,6 +320,144 @@ class ClassesStore {
 		}
 	}
 
+	/**
+	 * Add interest for non-registered user
+	 */
+	async addInterest(classId, contactData) {
+		try {
+			const client = await this.pool.connect();
+
+			// Check if class exists
+			const classRes = await client.query(
+				'SELECT * FROM classes WHERE id = $1',
+				[classId]
+			);
+
+			if (classRes.rows.length === 0) {
+				client.release();
+				throw new Error('Class not found');
+			}
+
+			// Check if email already expressed interest for this class
+			const existingRes = await client.query(
+				'SELECT * FROM class_waitlist WHERE class_id = $1 AND contact_email = $2',
+				[classId, contactData.email]
+			);
+
+			if (existingRes.rows.length > 0) {
+				client.release();
+				throw new Error('Email already registered interest for this class');
+			}
+
+			// Add interest
+			const interestSql = `
+			INSERT INTO class_waitlist (class_id, contact_name, contact_email, contact_phone, status)
+			VALUES ($1, $2, $3, $4, 'interested') RETURNING *
+		`;
+
+			const interestRes = await client.query(interestSql, [
+				classId,
+				contactData.name,
+				contactData.email,
+				contactData.phone || null,
+			]);
+
+			client.release();
+
+			return {
+				status: 'interested',
+				message: 'Interest registered successfully',
+				interest: interestRes.rows[0],
+			};
+		} catch (error) {
+			throw new Error(`Could not register interest: ${error.message}`);
+		}
+	}
+
+	/**
+	 * Get class interest list (admin)
+	 */
+	async getClassInterest(classId) {
+		try {
+			const sql = `
+			SELECT 
+				cw.*,
+				COALESCE(u.name, cw.contact_name) as display_name,
+				COALESCE(u.email, cw.contact_email) as display_email,
+				u.phone as user_phone,
+				CASE 
+					WHEN u.id IS NOT NULL THEN 'registered_user'
+					ELSE 'visitor'
+				END as user_type,
+				ROW_NUMBER() OVER (ORDER BY cw.created_at) as position
+			FROM class_waitlist cw
+			LEFT JOIN users u ON cw.user_id = u.id
+			WHERE cw.class_id = $1 AND cw.status IN ('interested', 'waiting')
+			ORDER BY 
+				CASE cw.status 
+					WHEN 'waiting' THEN 1 
+					WHEN 'interested' THEN 2 
+				END,
+				cw.created_at
+		`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [classId]);
+			client.release();
+			return res.rows;
+		} catch (error) {
+			throw new Error(`Could not get class interest: ${error.message}`);
+		}
+	}
+
+	/**
+	 * Convert interest to waitlist (admin)
+	 */
+	async convertInterestToWaitlist(interestId) {
+		try {
+			const sql = `
+			UPDATE class_waitlist 
+			SET status = 'waiting', updated_at = CURRENT_TIMESTAMP
+			WHERE id = $1 AND status = 'interested'
+			RETURNING *
+		`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [interestId]);
+			client.release();
+
+			if (res.rows.length === 0) {
+				throw new Error('Interest entry not found or already converted');
+			}
+
+			return res.rows[0];
+		} catch (error) {
+			throw new Error(
+				`Could not convert interest to waitlist: ${error.message}`
+			);
+		}
+	}
+
+	/**
+	 * Remove interest/waitlist entry (admin)
+	 */
+	async removeInterest(interestId) {
+		try {
+			const sql = 'DELETE FROM class_waitlist WHERE id = $1 RETURNING *';
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [interestId]);
+			client.release();
+
+			if (res.rows.length === 0) {
+				throw new Error('Interest entry not found');
+			}
+
+			return res.rows[0];
+		} catch (error) {
+			throw new Error(`Could not remove interest: ${error.message}`);
+		}
+	}
+
 	// ========================
 	// ENROLLMENT OPERATIONS
 	// ========================
@@ -825,9 +963,12 @@ function validateClass(classData) {
 			.required(),
 		skill_focus: Joi.string().min(1).max(100).required(),
 		// Video embed URL for YouTube/Vimeo etc.
-		video_embed_url: Joi.string().allow('', null).pattern(/^https?:\/\/.+/).messages({
-			'string.pattern.base': 'Video embed URL must be a valid HTTP/HTTPS URL',
-		}),
+		video_embed_url: Joi.string()
+			.allow('', null)
+			.pattern(/^https?:\/\/.+/)
+			.messages({
+				'string.pattern.base': 'Video embed URL must be a valid HTTP/HTTPS URL',
+			}),
 		// Multiple sessions support (new format)
 		sessions: Joi.array().items(sessionSchema).min(1),
 		// Legacy single session fields (backwards compatibility)

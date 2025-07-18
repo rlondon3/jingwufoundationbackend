@@ -394,6 +394,99 @@ const updateClassStatus = async (req, res) => {
 };
 
 /**
+ * Register interest in class (public, no auth required)
+ * POST /classes/:id/interest
+ */
+const registerInterest = async (req, res) => {
+	try {
+		const classId = parseInt(req.params.id);
+		const { name, email, phone } = req.body;
+
+		// Basic validation
+		if (!name || !email) {
+			return res.status(400).json({ error: 'Name and email are required' });
+		}
+
+		// Email validation
+		const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+		if (!emailRegex.test(email)) {
+			return res.status(400).json({ error: 'Valid email is required' });
+		}
+
+		const store = new ClassesStore(req.app.locals.pool);
+		const result = await store.addInterest(classId, { name, email, phone });
+
+		return res.status(201).json(result);
+	} catch (error) {
+		console.error('Register interest error:', error);
+		if (error.message.includes('already registered interest')) {
+			return res.status(400).json({ error: error.message });
+		}
+		if (error.message.includes('Class not found')) {
+			return res.status(404).json({ error: error.message });
+		}
+		return res.status(500).json({ error: 'Failed to register interest' });
+	}
+};
+
+/**
+ * Get class interest and waitlist (admin)
+ * GET /admin/classes/:id/interest
+ */
+const getClassInterest = async (req, res) => {
+	try {
+		const classId = parseInt(req.params.id);
+		const store = new ClassesStore(req.app.locals.pool);
+		const interest = await store.getClassInterest(classId);
+
+		return res.status(200).json(interest);
+	} catch (error) {
+		console.error('Get class interest error:', error);
+		return res.status(500).json({ error: 'Failed to get class interest' });
+	}
+};
+
+/**
+ * Convert interest to waitlist (admin)
+ * PUT /admin/classes/interest/:id/convert
+ */
+const convertInterestToWaitlist = async (req, res) => {
+	try {
+		const interestId = parseInt(req.params.id);
+		const store = new ClassesStore(req.app.locals.pool);
+		const result = await store.convertInterestToWaitlist(interestId);
+
+		return res.status(200).json({
+			message: 'Interest converted to waitlist successfully',
+			entry: result,
+		});
+	} catch (error) {
+		console.error('Convert interest error:', error);
+		return res.status(500).json({ error: 'Failed to convert interest' });
+	}
+};
+
+/**
+ * Remove interest entry (admin)
+ * DELETE /admin/classes/interest/:id
+ */
+const removeInterest = async (req, res) => {
+	try {
+		const interestId = parseInt(req.params.id);
+		const store = new ClassesStore(req.app.locals.pool);
+		const result = await store.removeInterest(interestId);
+
+		return res.status(200).json({
+			message: 'Interest removed successfully',
+			entry: result,
+		});
+	} catch (error) {
+		console.error('Remove interest error:', error);
+		return res.status(500).json({ error: 'Failed to remove interest' });
+	}
+};
+
+/**
  * Admin enroll student manually (admin)
  * POST /admin/classes/:id/enroll/manual
  */
@@ -495,6 +588,26 @@ const classes_route = (app) => {
 		authenticationToken,
 		requireAdmin,
 		adminEnrollStudent
+	);
+	app.post('/classes/:id/interest', registerInterest);
+
+	app.get(
+		'/admin/classes/:id/interest',
+		authenticationToken,
+		requireAdmin,
+		getClassInterest
+	);
+	app.put(
+		'/admin/classes/interest/:id/convert',
+		authenticationToken,
+		requireAdmin,
+		convertInterestToWaitlist
+	);
+	app.delete(
+		'/admin/classes/interest/:id',
+		authenticationToken,
+		requireAdmin,
+		removeInterest
 	);
 };
 

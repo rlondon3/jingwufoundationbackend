@@ -432,6 +432,136 @@ class CourseStore {
 		}
 	}
 
+	async storeQuizResponses(userId, lessonId, responses, attemptNumber = 1) {
+		try {
+			const client = await this.pool.connect();
+			await client.query('BEGIN');
+
+			// Delete existing responses for this attempt (if retaking)
+			await client.query(
+				'DELETE FROM user_quiz_responses WHERE user_id = $1 AND lesson_id = $2 AND attempt_number = $3',
+				[userId, lessonId, attemptNumber]
+			);
+
+			// Insert new responses
+			const sql = `
+				INSERT INTO user_quiz_responses 
+				(user_id, lesson_id, question_id, question_text, user_answer, correct_answer, is_correct, attempt_number)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			`;
+
+			for (const response of responses) {
+				await client.query(sql, [
+					userId,
+					lessonId,
+					response.question_id,
+					response.question_text,
+					response.user_answer,
+					response.correct_answer,
+					response.is_correct,
+					attemptNumber,
+				]);
+			}
+
+			await client.query('COMMIT');
+			client.release();
+			return true;
+		} catch (error) {
+			await client.query('ROLLBACK');
+			client.release();
+			throw new Error(`Could not store quiz responses: ${error}`);
+		}
+	}
+
+	/**
+	 * Get user's quiz responses for a lesson
+	 */
+	async getUserQuizResponses(userId, lessonId, attemptNumber = null) {
+		try {
+			let sql = `
+				SELECT * FROM user_quiz_responses 
+				WHERE user_id = $1 AND lesson_id = $2
+			`;
+			const params = [userId, lessonId];
+
+			if (attemptNumber) {
+				sql += ' AND attempt_number = $3';
+				params.push(attemptNumber);
+			}
+
+			sql += ' ORDER BY attempt_number DESC, answered_at';
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, params);
+			client.release();
+			return res.rows;
+		} catch (error) {
+			throw new Error(`Could not get quiz responses: ${error}`);
+		}
+	}
+
+	/**
+	 * Get quiz analytics for a lesson (admin)
+	 */
+	async getQuizAnalytics(lessonId) {
+		try {
+			const sql = `
+				SELECT 
+					question_id,
+					question_text,
+					COUNT(*) as total_responses,
+					COUNT(*) FILTER (WHERE is_correct = true) as correct_responses,
+					COUNT(*) FILTER (WHERE is_correct = false) as incorrect_responses,
+					ROUND(
+						(COUNT(*) FILTER (WHERE is_correct = true) * 100.0 / COUNT(*))::numeric, 
+						2
+					) as success_rate
+				FROM user_quiz_responses 
+				WHERE lesson_id = $1
+				GROUP BY question_id, question_text
+				ORDER BY success_rate ASC
+			`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [lessonId]);
+			client.release();
+			return res.rows;
+		} catch (error) {
+			throw new Error(`Could not get quiz analytics: ${error}`);
+		}
+	}
+
+	/**
+	 * Get user's quiz attempt history for a lesson
+	 */
+	async getUserQuizAttempts(userId, lessonId) {
+		try {
+			const sql = `
+				SELECT 
+					attempt_number,
+					COUNT(*) as total_questions,
+					COUNT(*) FILTER (WHERE is_correct = true) as correct_answers,
+					ROUND(
+						(COUNT(*) FILTER (WHERE is_correct = true) * 100.0 / COUNT(*))::numeric, 
+						2
+					) as score_percentage,
+					MIN(answered_at) as attempt_started,
+					MAX(answered_at) as attempt_completed
+				FROM user_quiz_responses 
+				WHERE user_id = $1 AND lesson_id = $2
+				GROUP BY attempt_number
+				ORDER BY attempt_number DESC
+			`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [userId, lessonId]);
+			client.release();
+			return res.rows;
+		} catch (error) {
+			throw new Error(`Could not get quiz attempts: ${error}`);
+		}
+	}
+
 	// ========================
 	// PROGRESS TRACKING
 	// ========================
@@ -439,29 +569,72 @@ class CourseStore {
 	/**
 	 * Mark lesson as completed for user
 	 */
-	async markLessonComplete(userId, lessonId, quizScore = null) {
+	async markLessonComplete(
+		userId,
+		lessonId,
+		quizScore = null,
+		quizResponses = null
+	) {
 		try {
-			const sql = `
-        INSERT INTO user_lesson_progress (user_id, lesson_id, completed, completed_at, quiz_score)
-			VALUES ($1, $2, true, CURRENT_TIMESTAMP, $3)
-			ON CONFLICT (user_id, lesson_id) 
-			DO UPDATE SET 
-			completed = true, 
-			completed_at = CURRENT_TIMESTAMP, 
-			quiz_score = $3, 
-			updated_at = CURRENT_TIMESTAMP
-			RETURNING *
-      `;
-
 			const client = await this.pool.connect();
+			await client.query('BEGIN');
+
+			// If this is a quiz lesson and we have responses, store them first
+			if (quizResponses && quizResponses.length > 0) {
+				// Get the next attempt number
+				const attemptSql = `
+					SELECT COALESCE(MAX(attempt_number), 0) + 1 as next_attempt
+					FROM user_quiz_responses 
+					WHERE user_id = $1 AND lesson_id = $2
+				`;
+				const attemptRes = await client.query(attemptSql, [userId, lessonId]);
+				const attemptNumber = attemptRes.rows[0].next_attempt;
+
+				// Store quiz responses
+				const responseSql = `
+					INSERT INTO user_quiz_responses 
+					(user_id, lesson_id, question_id, question_text, user_answer, correct_answer, is_correct, attempt_number)
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+				`;
+
+				for (const response of quizResponses) {
+					await client.query(responseSql, [
+						userId,
+						lessonId,
+						response.question_id,
+						response.question_text,
+						response.user_answer,
+						response.correct_answer,
+						response.is_correct,
+						attemptNumber,
+					]);
+				}
+			}
+
+			// Mark lesson as complete
+			const sql = `
+				INSERT INTO user_lesson_progress (user_id, lesson_id, completed, completed_at, quiz_score)
+				VALUES ($1, $2, true, CURRENT_TIMESTAMP, $3)
+				ON CONFLICT (user_id, lesson_id) 
+				DO UPDATE SET 
+				completed = true, 
+				completed_at = CURRENT_TIMESTAMP, 
+				quiz_score = $3, 
+				updated_at = CURRENT_TIMESTAMP
+				RETURNING *
+			`;
+
 			const res = await client.query(sql, [userId, lessonId, quizScore]);
+
+			await client.query('COMMIT');
 			client.release();
 			return res.rows[0];
 		} catch (error) {
+			await client.query('ROLLBACK');
+			client.release();
 			throw new Error(`Could not mark lesson complete: ${error}`);
 		}
 	}
-
 	/**
 	 * Get user's progress for a course
 	 */
