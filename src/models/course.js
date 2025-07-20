@@ -15,7 +15,7 @@ class CourseStore {
 	// ========================
 
 	/**
-	 * Get all published courses with basic info
+	 * Get all courses with basic info (both published and unpublished)
 	 */
 	async index() {
 		try {
@@ -23,7 +23,6 @@ class CourseStore {
         SELECT c.*, COUNT(m.id) as module_count 
         FROM courses c 
         LEFT JOIN modules m ON c.id = m.course_id 
-        WHERE c.is_published = true 
         GROUP BY c.id 
         ORDER BY c.created_at DESC
       `;
@@ -703,12 +702,12 @@ class CourseStore {
 	// ========================
 
 	/**
-	 * Get all course categories
+	 * Get all course categories (including unpublished courses)
 	 */
 	async getCategories() {
 		try {
 			const sql =
-				'SELECT DISTINCT category FROM courses WHERE is_published = true ORDER BY category';
+				'SELECT DISTINCT category FROM courses ORDER BY category';
 			const client = await this.pool.connect();
 			const res = await client.query(sql);
 			client.release();
@@ -719,14 +718,13 @@ class CourseStore {
 	}
 
 	/**
-	 * Search courses by title or description
+	 * Search courses by title or description (including unpublished courses)
 	 */
 	async searchCourses(searchTerm) {
 		try {
 			const sql = `
         SELECT * FROM courses 
-        WHERE is_published = true 
-        AND (title ILIKE $1 OR description ILIKE $1)
+        WHERE (title ILIKE $1 OR description ILIKE $1)
         ORDER BY title
       `;
 

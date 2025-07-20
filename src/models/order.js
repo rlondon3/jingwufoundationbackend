@@ -95,12 +95,12 @@ class OrderStore {
 
 			// Get current course price
 			const courseSql =
-				'SELECT regular_price FROM courses WHERE id = $1 AND is_published = true';
+				'SELECT regular_price FROM courses WHERE id = $1';
 			const courseRes = await client.query(courseSql, [order.course_id]);
 
 			if (courseRes.rows.length === 0) {
 				client.release();
-				throw new Error('Course not found or not published');
+				throw new Error('Course not found');
 			}
 
 			const coursePrice = courseRes.rows[0].regular_price;
