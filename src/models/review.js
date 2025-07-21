@@ -18,6 +18,7 @@ class ReviewStore {
 	 * Get all published reviews for a course
 	 */
 	async getCourseReviews(courseId) {
+		let client;
 		try {
 			const sql = `
         SELECT 
@@ -30,11 +31,38 @@ class ReviewStore {
         ORDER BY r.created_at DESC
       `;
 
-			const client = await this.pool.connect();
+			client = await this.pool.connect();
 			const res = await client.query(sql, [courseId]);
+			
+			// For each review, if it's a guided feedback review, fetch the feedback responses
+			const reviewsWithFeedback = await Promise.all(
+				res.rows.map(async (review) => {
+					if (review.is_guided_feedback) {
+						// Get guided feedback responses for this review
+						const feedbackSql = `
+							SELECT 
+								cfr.*,
+								cfq.question_text,
+								cfq.question_type
+							FROM course_feedback_responses cfr
+							JOIN course_feedback_questions cfq ON cfr.question_id = cfq.id
+							WHERE cfr.review_id = $1
+							ORDER BY cfq.display_order ASC
+						`;
+						
+						const feedbackRes = await client.query(feedbackSql, [review.id]);
+						review.guided_feedback_responses = feedbackRes.rows;
+					}
+					return review;
+				})
+			);
+
 			client.release();
-			return res.rows;
+			return reviewsWithFeedback;
 		} catch (error) {
+			if (client) {
+				client.release();
+			}
 			throw new Error(`Can't retrieve course reviews: ${error}`);
 		}
 	}
@@ -382,6 +410,7 @@ class ReviewStore {
 	 * Get all reviews (admin view - includes unpublished)
 	 */
 	async getAllReviews() {
+		let client;
 		try {
 			const sql = `
         SELECT 
@@ -395,11 +424,38 @@ class ReviewStore {
         ORDER BY r.created_at DESC
       `;
 
-			const client = await this.pool.connect();
+			client = await this.pool.connect();
 			const res = await client.query(sql);
+			
+			// For each review, if it's a guided feedback review, fetch the feedback responses
+			const reviewsWithFeedback = await Promise.all(
+				res.rows.map(async (review) => {
+					if (review.is_guided_feedback) {
+						// Get guided feedback responses for this review
+						const feedbackSql = `
+							SELECT 
+								cfr.*,
+								cfq.question_text,
+								cfq.question_type
+							FROM course_feedback_responses cfr
+							JOIN course_feedback_questions cfq ON cfr.question_id = cfq.id
+							WHERE cfr.review_id = $1
+							ORDER BY cfq.display_order ASC
+						`;
+						
+						const feedbackRes = await client.query(feedbackSql, [review.id]);
+						review.guided_feedback_responses = feedbackRes.rows;
+					}
+					return review;
+				})
+			);
+
 			client.release();
-			return res.rows;
+			return reviewsWithFeedback;
 		} catch (error) {
+			if (client) {
+				client.release();
+			}
 			throw new Error(`Can't retrieve all reviews: ${error}`);
 		}
 	}

@@ -206,7 +206,7 @@ class UserStore {
 		try {
 			const sql = `
         SELECT * FROM user_courses 
-        WHERE user_id = $1 
+        WHERE user_id = $1 AND is_active = true 
         ORDER BY start_date DESC
       `;
 
@@ -298,12 +298,12 @@ class UserStore {
 	async enrollUserInCourse(userId, courseId, startDate) {
 		try {
 			const sql = `
-        INSERT INTO user_courses (user_id, course_id, start_date, progress) 
-        VALUES ($1, $2, $3, $4) RETURNING *
+        INSERT INTO user_courses (user_id, course_id, start_date, progress, is_active) 
+        VALUES ($1, $2, $3, $4, $5) RETURNING *
       `;
 
 			const client = await this.pool.connect();
-			const res = await client.query(sql, [userId, courseId, startDate, 0]);
+			const res = await client.query(sql, [userId, courseId, startDate, 0, true]);
 			client.release();
 			return res.rows[0];
 		} catch (error) {
@@ -312,6 +312,22 @@ class UserStore {
 	}
 
 	async isUserEnrolled(userId, courseId) {
+		try {
+			const sql = `
+				SELECT COUNT(*) FROM user_courses 
+				WHERE user_id = $1 AND course_id = $2 AND is_active = true
+			`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [userId, courseId]);
+			client.release();
+			return parseInt(res.rows[0].count) > 0;
+		} catch (error) {
+			throw new Error(`Could not check enrollment: ${error}`);
+		}
+	}
+
+	async isUserEnrolledAny(userId, courseId) {
 		try {
 			const sql = `
 				SELECT COUNT(*) FROM user_courses 
@@ -327,10 +343,34 @@ class UserStore {
 		}
 	}
 
-	async unenrollUserFromCourse(userId, courseId) {
+	async updateEnrollmentStatus(userId, courseId, isActive) {
 		try {
 			const sql = `
-				DELETE FROM user_courses 
+				UPDATE user_courses 
+				SET is_active = $3, updated_at = CURRENT_TIMESTAMP
+				WHERE user_id = $1 AND course_id = $2 
+				RETURNING *
+			`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [userId, courseId, isActive]);
+			client.release();
+			
+			if (res.rows.length === 0) {
+				throw new Error('Enrollment not found');
+			}
+			
+			return res.rows[0];
+		} catch (error) {
+			throw new Error(`Could not update enrollment status: ${error}`);
+		}
+	}
+
+	async suspendUserFromCourse(userId, courseId) {
+		try {
+			const sql = `
+				UPDATE user_courses 
+				SET is_active = false, updated_at = CURRENT_TIMESTAMP
 				WHERE user_id = $1 AND course_id = $2 
 				RETURNING *
 			`;
@@ -340,7 +380,62 @@ class UserStore {
 			client.release();
 			return res.rows[0] || null;
 		} catch (error) {
+			throw new Error(`Could not suspend user from course: ${error}`);
+		}
+	}
+
+	async unenrollUserFromCourse(userId, courseId) {
+		const client = await this.pool.connect();
+		try {
+			await client.query('BEGIN');
+
+			// Delete user's lesson progress data for this course
+			await client.query(`
+				DELETE FROM user_lesson_progress 
+				WHERE user_id = $1 
+				AND lesson_id IN (
+					SELECT l.id FROM lessons l 
+					JOIN modules m ON l.module_id = m.id 
+					WHERE m.course_id = $2
+				)
+			`, [userId, courseId]);
+
+			// Delete user's quiz responses for this course
+			await client.query(`
+				DELETE FROM user_quiz_responses 
+				WHERE user_id = $1 
+				AND lesson_id IN (
+					SELECT l.id FROM lessons l 
+					JOIN modules m ON l.module_id = m.id 
+					WHERE m.course_id = $2
+				)
+			`, [userId, courseId]);
+
+			// Delete user's guided feedback responses for this course
+			// Note: We preserve reviews as they are valuable course feedback data
+			await client.query(`
+				DELETE FROM course_feedback_responses 
+				WHERE user_id = $1 
+				AND review_id IN (
+					SELECT r.id FROM reviews r 
+					WHERE r.user_id = $1 AND r.course_id = $2
+				)
+			`, [userId, courseId]);
+
+			// Finally, delete the main enrollment record
+			const enrollmentResult = await client.query(`
+				DELETE FROM user_courses 
+				WHERE user_id = $1 AND course_id = $2 
+				RETURNING *
+			`, [userId, courseId]);
+
+			await client.query('COMMIT');
+			return enrollmentResult.rows[0] || null;
+		} catch (error) {
+			await client.query('ROLLBACK');
 			throw new Error(`Could not unenroll user from course: ${error}`);
+		} finally {
+			client.release();
 		}
 	}
 
@@ -478,13 +573,46 @@ class UserStore {
 
 			const result = res.rows[0];
 			if (result) {
+				const newProgress = parseInt(result.calculated_progress);
+				console.log(`[GUIDED FEEDBACK DEBUG] calculateCourseProgress - User ${userId}, Course ${courseId}, Progress ${newProgress}%`);
+				
 				// Update the user_courses table with calculated progress
 				await this.updateCourseProgress(
 					userId,
 					courseId,
-					parseInt(result.calculated_progress)
+					newProgress
 				);
-				return parseInt(result.calculated_progress);
+				
+				// Check for feedback triggers after progress update
+				try {
+					const { GuidedFeedbackStore } = require('./guidedFeedback');
+					const feedbackStore = new GuidedFeedbackStore(this.pool);
+					
+					console.log(`[GUIDED FEEDBACK DEBUG] Checking feedback triggers...`);
+					const shouldTrigger = await feedbackStore.shouldTriggerFeedback(
+						userId,
+						courseId,
+						newProgress
+					);
+					console.log(`[GUIDED FEEDBACK DEBUG] shouldTrigger result:`, shouldTrigger);
+					
+					if (shouldTrigger) {
+						console.log(`[GUIDED FEEDBACK DEBUG] Returning feedback trigger data:`, shouldTrigger);
+						// Return progress with feedback trigger info
+						return {
+							progress: newProgress,
+							feedbackTrigger: shouldTrigger
+						};
+					} else {
+						console.log(`[GUIDED FEEDBACK DEBUG] No feedback trigger needed for this progress level`);
+					}
+				} catch (feedbackError) {
+					console.error('[GUIDED FEEDBACK DEBUG] Error checking feedback triggers:', feedbackError);
+					console.warn('Failed to check feedback triggers:', feedbackError.message);
+					// Don't fail progress update if feedback check fails
+				}
+				
+				return newProgress;
 			}
 
 			return 0;

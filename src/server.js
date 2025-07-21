@@ -23,6 +23,7 @@ const password_reset_route = require('./handlers/passwordReset');
 const terms_route = require('./handlers/termsOfService');
 const blog_route = require('./handlers/blogs');
 const testimonials_route = require('./handlers/testimonials');
+const guided_feedback_route = require('./handlers/guidedFeedback');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -124,6 +125,7 @@ password_reset_route(app);
 terms_route(app);
 blog_route(app);
 testimonials_route(app);
+guided_feedback_route(app);
 
 // Error handling for unhandled promise rejections
 process.on('unhandledRejection', (reason, promise) => {

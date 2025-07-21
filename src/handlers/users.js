@@ -474,8 +474,8 @@ const users_route = (app) => {
 		const { id: userId, courseId } = req.params;
 
 		try {
-			// Check if user is enrolled
-			const isEnrolled = await store.isUserEnrolled(
+			// Check if user is enrolled (check any enrollment, including suspended)
+			const isEnrolled = await store.isUserEnrolledAny(
 				parseInt(userId),
 				parseInt(courseId)
 			);
@@ -486,18 +486,19 @@ const users_route = (app) => {
 					.json({ error: 'User is not enrolled in this course' });
 			}
 
-			const result = await store.unenrollUserFromCourse(
+			// For user-level unenroll, suspend access (preserve data)
+			const result = await store.suspendUserFromCourse(
 				parseInt(userId),
 				parseInt(courseId)
 			);
 
 			return res.status(200).json({
-				message: 'Successfully unenrolled from course',
+				message: 'Successfully suspended access to course',
 				result,
 			});
 		} catch (error) {
-			console.error('Unenrollment error:', error);
-			return res.status(500).json({ error: 'Failed to unenroll from course' });
+			console.error('Course suspension error:', error);
+			return res.status(500).json({ error: 'Failed to suspend course access' });
 		}
 	};
 
@@ -535,15 +536,25 @@ const users_route = (app) => {
 		const { id: userId, courseId } = req.params;
 
 		try {
-			const progress = await store.calculateCourseProgress(
+			const result = await store.calculateCourseProgress(
 				parseInt(userId),
 				parseInt(courseId)
 			);
 
-			return res.status(200).json({
-				progress,
-				message: 'Progress calculated and updated',
-			});
+			// Handle both old format (number) and new format (object with feedback info)
+			if (typeof result === 'object' && result.feedbackTrigger) {
+				return res.status(200).json({
+					progress: result.progress,
+					message: 'Progress calculated and updated',
+					feedbackTrigger: result.feedbackTrigger
+				});
+			} else {
+				const progress = typeof result === 'object' ? result.progress : result;
+				return res.status(200).json({
+					progress,
+					message: 'Progress calculated and updated',
+				});
+			}
 		} catch (error) {
 			console.error('Calculate course progress error:', error);
 			return res.status(500).json({ error: 'Failed to calculate progress' });
@@ -608,6 +619,206 @@ const users_route = (app) => {
 		}
 	};
 
+	/**
+	 * Admin enroll user in course (direct enrollment, bypasses payment)
+	 * POST /admin/user/:id/enroll/:courseId - requires admin authentication
+	 */
+	const adminEnrollUser = async (req, res) => {
+		const { id: userId, courseId } = req.params;
+
+		try {
+			// Check if user already enrolled (including suspended enrollments)
+			const isAlreadyEnrolled = await store.isUserEnrolledAny(
+				parseInt(userId),
+				parseInt(courseId)
+			);
+
+			if (isAlreadyEnrolled) {
+				return res
+					.status(400)
+					.json({ error: 'User is already enrolled in this course' });
+			}
+
+			// Get course and user info for messaging
+			const { CourseStore } = require('../models/course');
+			const courseStore = new CourseStore(req.app.locals.pool);
+			const course = await courseStore.show(parseInt(courseId));
+			const user = await store.show(parseInt(userId));
+
+			if (!course || !user) {
+				return res.status(404).json({ error: 'Course or user not found' });
+			}
+
+			// Direct enrollment (bypasses payment)
+			const enrollment = await store.enrollUserInCourse(
+				parseInt(userId),
+				parseInt(courseId),
+				new Date()
+			);
+
+			// Send in-app message to user
+			try {
+				const { MessageStore } = require('../models/message');
+				const messageStore = new MessageStore(req.app.locals.pool);
+				
+				await messageStore.sendMessage(
+					req.user.id, // Admin who enrolled them
+					parseInt(userId),
+					`Great news! An administrator has enrolled you in the course "${course.title}". You now have full access to all course materials and can start learning immediately. Welcome to the course!`
+				);
+			} catch (messageError) {
+				console.warn('Failed to send enrollment notification:', messageError.message);
+				// Don't fail the enrollment if messaging fails
+			}
+
+			return res.status(201).json({
+				message: 'Successfully enrolled user in course',
+				enrollment,
+				course_title: course.title,
+				user_name: user.name
+			});
+		} catch (error) {
+			console.error('Admin enrollment error:', error);
+			return res.status(500).json({ error: 'Failed to enroll user in course' });
+		}
+	};
+
+	/**
+	 * Admin suspend user from course (preserve data)
+	 * POST /admin/user/:id/enroll/:courseId/suspend - requires admin authentication
+	 */
+	const adminSuspendFromCourse = async (req, res) => {
+		const { id: userId, courseId } = req.params;
+
+		try {
+			// Check if user is enrolled (check any enrollment, including suspended)
+			const isEnrolled = await store.isUserEnrolledAny(
+				parseInt(userId),
+				parseInt(courseId)
+			);
+
+			if (!isEnrolled) {
+				return res
+					.status(400)
+					.json({ error: 'User is not enrolled in this course' });
+			}
+
+			const result = await store.suspendUserFromCourse(
+				parseInt(userId),
+				parseInt(courseId)
+			);
+
+			return res.status(200).json({
+				message: 'Successfully suspended user from course',
+				result,
+			});
+		} catch (error) {
+			console.error('Admin suspension error:', error);
+			return res.status(500).json({ error: 'Failed to suspend user from course' });
+		}
+	};
+
+	/**
+	 * Admin unenroll user from course (delete all data)
+	 * DELETE /admin/user/:id/enroll/:courseId - requires admin authentication
+	 */
+	const adminUnenrollFromCourse = async (req, res) => {
+		const { id: userId, courseId } = req.params;
+
+		try {
+			// Check if user is enrolled (check any enrollment, including suspended)
+			const isEnrolled = await store.isUserEnrolledAny(
+				parseInt(userId),
+				parseInt(courseId)
+			);
+
+			if (!isEnrolled) {
+				return res
+					.status(400)
+					.json({ error: 'User is not enrolled in this course' });
+			}
+
+			// Complete removal - deletes all course data
+			const result = await store.unenrollUserFromCourse(
+				parseInt(userId),
+				parseInt(courseId)
+			);
+
+			return res.status(200).json({
+				message: 'Successfully removed user from course',
+				result,
+			});
+		} catch (error) {
+			console.error('Admin unenrollment error:', error);
+			return res.status(500).json({ error: 'Failed to remove user from course' });
+		}
+	};
+
+	/**
+	 * Toggle enrollment status (admin only)
+	 * POST /admin/user/:id/enroll/:courseId/status - requires admin authentication
+	 */
+	const toggleEnrollmentStatus = async (req, res) => {
+		const { id: userId, courseId } = req.params;
+		const { is_active } = req.body;
+
+		if (typeof is_active !== 'boolean') {
+			return res.status(400).json({ error: 'is_active must be a boolean value' });
+		}
+
+		try {
+			// Check if user is enrolled
+			const enrollment = await store.getEnrollment(
+				parseInt(userId),
+				parseInt(courseId)
+			);
+
+			if (!enrollment) {
+				return res.status(404).json({ error: 'Enrollment not found' });
+			}
+
+			const updatedEnrollment = await store.updateEnrollmentStatus(
+				parseInt(userId),
+				parseInt(courseId),
+				is_active
+			);
+
+			return res.status(200).json({
+				message: `Enrollment ${is_active ? 'activated' : 'suspended'} successfully`,
+				enrollment: updatedEnrollment,
+			});
+		} catch (error) {
+			console.error('Toggle enrollment status error:', error);
+			return res.status(500).json({ error: 'Failed to update enrollment status' });
+		}
+	};
+
+	/**
+	 * Calculate course progress with integrated feedback trigger checking
+	 * PUT /user/:id/course/:courseId/calculate-progress
+	 */
+	const calculateCourseProgressWithFeedback = async (req, res) => {
+		const { id: userId, courseId } = req.params;
+
+		try {
+			console.log(`[API] calculateCourseProgressWithFeedback called for user ${userId}, course ${courseId}`);
+			
+			// Call the calculateCourseProgress method which includes feedback trigger checking
+			const result = await store.calculateCourseProgress(
+				parseInt(userId),
+				parseInt(courseId)
+			);
+
+			console.log(`[API] calculateCourseProgressWithFeedback result:`, result);
+
+			// Return the result (could be just progress number or object with feedbackTrigger)
+			return res.status(200).json(result);
+		} catch (error) {
+			console.error('Calculate course progress with feedback error:', error);
+			return res.status(500).json({ error: 'Failed to calculate course progress' });
+		}
+	};
+
 	// Import authentication middleware
 	const {
 		authenticationToken,
@@ -631,16 +842,15 @@ const users_route = (app) => {
 		authenticateUserId,
 		updateCourseProgress
 	);
+	app.put(
+		'/user/:id/course/:courseId/calculate-progress',
+		authenticateUserId,
+		calculateCourseProgressWithFeedback
+	);
 	app.get(
 		'/user/:id/course/:courseId/lessons/progress',
 		authenticationToken,
 		getUserLessonProgress
-	);
-
-	app.post(
-		'/user/:id/course/:courseId/calculate-progress',
-		authenticateUserId,
-		calculateCourseProgress
 	);
 
 	//enrollment routes
@@ -659,6 +869,12 @@ const users_route = (app) => {
 	// Account status routes
 	app.post('/user/:id/deactivate', authenticateUserId, deactivateAccount);
 	app.post('/admin/user/:id/reactivate', authenticationToken, requireAdmin, reactivateAccount);
+
+	// Admin enrollment routes
+	app.post('/admin/user/:id/enroll/:courseId', authenticationToken, requireAdmin, adminEnrollUser);
+	app.post('/admin/user/:id/enroll/:courseId/suspend', authenticationToken, requireAdmin, adminSuspendFromCourse);
+	app.delete('/admin/user/:id/enroll/:courseId', authenticationToken, requireAdmin, adminUnenrollFromCourse);
+	app.post('/admin/user/:id/enroll/:courseId/status', authenticationToken, requireAdmin, toggleEnrollmentStatus);
 };
 
 module.exports = users_route;
