@@ -69,10 +69,8 @@ const initiateFeedback = async (req, res) => {
 				.json({ error: 'Valid trigger percentage required' });
 		}
 
-		console.log(`[GUIDED FEEDBACK DEBUG] initiateFeedback called - User: ${userId}, Course: ${courseId}, Trigger: ${trigger_percentage}%`);
 
 		const store = new GuidedFeedbackStore(req.app.locals.pool);
-		console.log(`[GUIDED FEEDBACK DEBUG] Creating feedback store and calling initiateFeedback...`);
 		
 		const feedback = await store.initiateFeedback(
 			userId,
@@ -80,15 +78,13 @@ const initiateFeedback = async (req, res) => {
 			trigger_percentage
 		);
 
-		console.log(`[GUIDED FEEDBACK DEBUG] Feedback initiated successfully:`, feedback);
 		return res.status(201).json({
 			message: 'Feedback session initiated',
-			review_id: feedback.review.id,
+			review_id: feedback.review_id,
 			questions: feedback.questions,
 		});
 	} catch (error) {
-		console.error('[GUIDED FEEDBACK DEBUG] Initiate feedback error:', error);
-		console.error('[GUIDED FEEDBACK DEBUG] Full error details:', error.message, error.stack);
+		console.error('Initiate feedback error:', error);
 		return res.status(500).json({ error: 'Failed to initiate feedback' });
 	}
 };
@@ -187,6 +183,38 @@ const checkCanProgress = async (req, res) => {
 		return res
 			.status(500)
 			.json({ error: 'Failed to check progress permissions' });
+	}
+};
+
+/**
+ * Check if feedback should be triggered for user at current progress
+ * GET /courses/:courseId/feedback/should-trigger?progress=50
+ */
+const shouldTriggerFeedback = async (req, res) => {
+	try {
+		const courseId = parseInt(req.params.courseId);
+		const currentProgress = parseInt(req.query.progress);
+		const userId = req.user.id;
+
+		if (!currentProgress || currentProgress < 0 || currentProgress > 100) {
+			return res
+				.status(400)
+				.json({ error: 'Valid progress percentage required (0-100)' });
+		}
+
+		const store = new GuidedFeedbackStore(req.app.locals.pool);
+		const trigger = await store.shouldTriggerFeedback(
+			userId,
+			courseId,
+			currentProgress
+		);
+
+		return res.status(200).json(trigger);
+	} catch (error) {
+		console.error('Should trigger feedback error:', error);
+		return res
+			.status(500)
+			.json({ error: 'Failed to check feedback trigger' });
 	}
 };
 
@@ -464,6 +492,11 @@ const guided_feedback_route = (app) => {
 		'/courses/:courseId/progress/check',
 		authenticationToken,
 		checkCanProgress
+	);
+	app.get(
+		'/courses/:courseId/feedback/should-trigger',
+		authenticationToken,
+		shouldTriggerFeedback
 	);
 
 	// Admin question management routes

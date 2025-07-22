@@ -241,11 +241,9 @@ class GuidedFeedbackStore {
 	 */
 	async shouldTriggerFeedback(userId, courseId, currentProgress) {
 		try {
-			console.log(`[GUIDED FEEDBACK DEBUG] shouldTriggerFeedback called - User: ${userId}, Course: ${courseId}, Progress: ${currentProgress}%`);
-			
 			const sql = `
 				SELECT t.*, 
-					CASE WHEN r.id IS NULL THEN true ELSE false END as needs_feedback
+					CASE WHEN r.id IS NULL OR r.feedback_completed_at IS NULL THEN true ELSE false END as needs_feedback
 				FROM course_feedback_triggers t
 				LEFT JOIN reviews r ON r.user_id = $1 AND r.course_id = $2 
 					AND r.is_guided_feedback = true AND r.triggered_at_percentage = t.trigger_percentage
@@ -255,33 +253,19 @@ class GuidedFeedbackStore {
 				LIMIT 1
 			`;
 
-			console.log(`[GUIDED FEEDBACK DEBUG] SQL Query:`, sql);
-			console.log(`[GUIDED FEEDBACK DEBUG] Query params:`, [userId, courseId, currentProgress]);
-
 			const client = await this.pool.connect();
 			const res = await client.query(sql, [userId, courseId, currentProgress]);
 			client.release();
 
-			console.log(`[GUIDED FEEDBACK DEBUG] Query returned ${res.rows.length} rows:`, res.rows);
-
 			if (res.rows.length > 0) {
 				const trigger = res.rows[0];
-				console.log(`[GUIDED FEEDBACK DEBUG] Found trigger:`, trigger);
-				console.log(`[GUIDED FEEDBACK DEBUG] needs_feedback:`, trigger.needs_feedback);
-				
 				if (trigger.needs_feedback) {
-					console.log(`[GUIDED FEEDBACK DEBUG] Returning trigger for feedback`);
 					return trigger;
-				} else {
-					console.log(`[GUIDED FEEDBACK DEBUG] User already provided feedback for this trigger percentage`);
 				}
-			} else {
-				console.log(`[GUIDED FEEDBACK DEBUG] No active triggers found for this progress level`);
 			}
 			
 			return null;
 		} catch (error) {
-			console.error(`[GUIDED FEEDBACK DEBUG] Error in shouldTriggerFeedback:`, error);
 			throw new Error(`Could not check feedback trigger: ${error}`);
 		}
 	}
@@ -292,30 +276,41 @@ class GuidedFeedbackStore {
 	async initiateFeedback(userId, courseId, triggerPercentage) {
 		let client;
 		try {
-			console.log(`[GUIDED FEEDBACK DEBUG] initiateFeedback model method called - User: ${userId}, Course: ${courseId}, Trigger: ${triggerPercentage}%`);
 			
 			client = await this.pool.connect();
 			await client.query('BEGIN');
 
-			// Create guided feedback review
-			// Note: We provide a placeholder rating of 1 for guided feedback reviews 
-			// since they're created before the user provides their actual rating
-			// The rating will be updated when the user completes the feedback
-			const reviewSql = `
-				INSERT INTO reviews (user_id, course_id, rating, is_guided_feedback, triggered_at_percentage)
-				VALUES ($1, $2, $3, true, $4) RETURNING *
+			// Check for existing incomplete review first
+			const existingReviewSql = `
+				SELECT * FROM reviews 
+				WHERE user_id = $1 AND course_id = $2 AND is_guided_feedback = true 
+					AND triggered_at_percentage = $3 AND feedback_completed_at IS NULL
 			`;
-			console.log(`[GUIDED FEEDBACK DEBUG] Inserting review with SQL:`, reviewSql);
-			console.log(`[GUIDED FEEDBACK DEBUG] Review params:`, [userId, courseId, 1, triggerPercentage]);
 			
-			const reviewRes = await client.query(reviewSql, [
-				userId,
-				courseId,
-				1, // Placeholder rating (1-5 required) - will be updated by user
-				triggerPercentage,
-			]);
-			const review = reviewRes.rows[0];
-			console.log(`[GUIDED FEEDBACK DEBUG] Review created:`, review);
+			const existingRes = await client.query(existingReviewSql, [userId, courseId, triggerPercentage]);
+			
+			let review;
+			if (existingRes.rows.length > 0) {
+				// Use existing incomplete review
+				review = existingRes.rows[0];
+			} else {
+				// Create new guided feedback review
+				// Note: We provide a placeholder rating of 1 for guided feedback reviews 
+				// since they're created before the user provides their actual rating
+				// The rating will be updated when the user completes the feedback
+				const reviewSql = `
+					INSERT INTO reviews (user_id, course_id, rating, is_guided_feedback, triggered_at_percentage)
+					VALUES ($1, $2, $3, true, $4) RETURNING *
+				`;
+				
+				const reviewRes = await client.query(reviewSql, [
+					userId,
+					courseId,
+					1, // Placeholder rating (1-5 required) - will be updated by user
+					triggerPercentage,
+				]);
+				review = reviewRes.rows[0];
+			}
 
 			// Get questions for this course
 			const questionsSql = `
@@ -323,40 +318,27 @@ class GuidedFeedbackStore {
 				WHERE course_id = $1 AND is_active = true
 				ORDER BY display_order ASC
 			`;
-			console.log(`[GUIDED FEEDBACK DEBUG] Getting questions with SQL:`, questionsSql);
-			console.log(`[GUIDED FEEDBACK DEBUG] Questions params:`, [courseId]);
 			
 			const questionsRes = await client.query(questionsSql, [courseId]);
-			console.log(`[GUIDED FEEDBACK DEBUG] Found ${questionsRes.rows.length} questions:`, questionsRes.rows);
 
 			await client.query('COMMIT');
 			client.release();
 
 			const result = {
-				review: review,
+				review_id: review.id,
 				questions: questionsRes.rows,
 			};
-			console.log(`[GUIDED FEEDBACK DEBUG] Returning feedback result:`, result);
 			return result;
 		} catch (error) {
-			console.error(`[GUIDED FEEDBACK DEBUG] Error in initiateFeedback model:`, error);
-			console.error(`[GUIDED FEEDBACK DEBUG] Error details:`, {
-				message: error.message,
-				code: error.code,
-				detail: error.detail,
-				table: error.table,
-				column: error.column,
-				constraint: error.constraint
-			});
 			if (client) {
 				try {
 					await client.query('ROLLBACK');
 					client.release();
 				} catch (rollbackError) {
-					console.error(`[GUIDED FEEDBACK DEBUG] Rollback error:`, rollbackError);
+					// Rollback failed, but we'll still throw the original error
 				}
 			}
-			throw error; // Throw original error instead of wrapping it
+			throw new Error(`Could not initiate guided feedback: ${error}`);
 		}
 	}
 
@@ -567,7 +549,7 @@ function validateTrigger(triggerData) {
 function validateResponse(responseData) {
 	const responseSchema = Joi.object({
 		question_id: Joi.number().integer().positive().required(),
-		response_text: Joi.string().max(2000).allow('', null),
+		response_text: Joi.string().min(10).max(2000).allow('', null),
 		response_boolean: Joi.boolean().allow(null),
 	}).xor('response_text', 'response_boolean'); // Must have one or the other
 
