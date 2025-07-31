@@ -1,24 +1,30 @@
 // handlers/resources.js
 require('dotenv').config();
 const { ResourceStore, validateResource } = require('../models/resource');
-const { authenticationToken, requireAdmin } = require('../middleware/auth');
+const {
+	authenticationToken,
+	requireAdmin,
+	authenticateUserId,
+} = require('../middleware/auth');
 
 /**
  * Resource Handlers - All business logic for resource operations
+ * Updated to support add-on purchases and access control
  */
 
 // ========================
-// PUBLIC RESOURCE HANDLERS
+// PUBLIC RESOURCE HANDLERS (Updated)
 // ========================
 
 /**
- * Get all published resources
+ * Get all published resources with purchase status for authenticated users
  * GET /resources
  */
 const index = async (req, res) => {
 	try {
 		const store = new ResourceStore(req.app.locals.pool);
-		const resources = await store.index();
+		const userId = req.user?.id || null;
+		const resources = await store.index(userId);
 		return res.status(200).json(resources);
 	} catch (error) {
 		console.error('Get resources error:', error);
@@ -27,13 +33,14 @@ const index = async (req, res) => {
 };
 
 /**
- * Get single resource by ID
+ * Get single resource by ID with access control for add-ons
  * GET /resources/:id
  */
 const show = async (req, res) => {
 	try {
 		const store = new ResourceStore(req.app.locals.pool);
-		const resource = await store.show(parseInt(req.params.id));
+		const userId = req.user?.id || null;
+		const resource = await store.show(parseInt(req.params.id), userId);
 
 		if (!resource) {
 			return res.status(404).json({ error: 'Resource not found' });
@@ -44,6 +51,38 @@ const show = async (req, res) => {
 			return res.status(404).json({ error: 'Resource not found' });
 		}
 
+		// Check access for add-on resources
+		if (resource.is_add_on && !req.user?.is_admin) {
+			if (!userId) {
+				// Return limited info for unauthenticated users
+				return res.status(200).json({
+					...resource,
+					content: null,
+					video_url: null,
+					audio_url: null,
+					user_has_access: false,
+					access_required: true,
+					message:
+						'This is a premium add-on. Please sign in and purchase to access full content.',
+				});
+			}
+
+			// Check if user has purchased this add-on
+			const hasAccess = resource.user_has_access;
+			if (!hasAccess) {
+				return res.status(200).json({
+					...resource,
+					content: null,
+					video_url: null,
+					audio_url: null,
+					user_has_access: false,
+					access_required: true,
+					message:
+						'This is a premium add-on. Purchase required to access full content.',
+				});
+			}
+		}
+
 		return res.status(200).json(resource);
 	} catch (error) {
 		console.error('Get resource error:', error);
@@ -52,7 +91,7 @@ const show = async (req, res) => {
 };
 
 /**
- * Get resources by type
+ * Get resources by type with purchase status
  * GET /resources/type/:type
  */
 const getByType = async (req, res) => {
@@ -64,7 +103,8 @@ const getByType = async (req, res) => {
 		}
 
 		const store = new ResourceStore(req.app.locals.pool);
-		const resources = await store.getByType(type);
+		const userId = req.user?.id || null;
+		const resources = await store.getByType(type, userId);
 		return res.status(200).json(resources);
 	} catch (error) {
 		console.error('Get resources by type error:', error);
@@ -75,7 +115,7 @@ const getByType = async (req, res) => {
 };
 
 /**
- * Get resources by author
+ * Get resources by author (unchanged)
  * GET /resources/author/:author
  */
 const getByAuthor = async (req, res) => {
@@ -93,7 +133,7 @@ const getByAuthor = async (req, res) => {
 };
 
 /**
- * Search resources
+ * Search resources with purchase status
  * GET /resources/search?q=searchTerm
  */
 const search = async (req, res) => {
@@ -111,7 +151,8 @@ const search = async (req, res) => {
 		}
 
 		const store = new ResourceStore(req.app.locals.pool);
-		const resources = await store.search(searchTerm);
+		const userId = req.user?.id || null;
+		const resources = await store.search(searchTerm, userId);
 		return res.status(200).json(resources);
 	} catch (error) {
 		console.error('Search resources error:', error);
@@ -120,7 +161,7 @@ const search = async (req, res) => {
 };
 
 /**
- * Get resources by course
+ * Get resources by course (unchanged)
  * GET /resources/course/:courseId
  */
 const getByCourse = async (req, res) => {
@@ -138,7 +179,7 @@ const getByCourse = async (req, res) => {
 };
 
 /**
- * Get all authors
+ * Get all authors (unchanged)
  * GET /resources/authors
  */
 const getAuthors = async (req, res) => {
@@ -153,11 +194,90 @@ const getAuthors = async (req, res) => {
 };
 
 // ========================
-// ADMIN RESOURCE HANDLERS
+// ADD-ON SPECIFIC HANDLERS
 // ========================
 
 /**
- * Get all resources (admin view - includes drafts)
+ * Get all available add-ons with purchase status
+ * GET /resources/addons
+ */
+const getAddOns = async (req, res) => {
+	try {
+		const store = new ResourceStore(req.app.locals.pool);
+		const userId = req.user?.id || null;
+		const addOns = await store.getAddOns(userId);
+		return res.status(200).json(addOns);
+	} catch (error) {
+		console.error('Get add-ons error:', error);
+		return res.status(500).json({ error: 'Failed to retrieve add-ons' });
+	}
+};
+
+/**
+ * Check if user has purchased specific add-on
+ * GET /users/:userId/resources/:resourceId/access
+ */
+const checkUserAddOnAccess = async (req, res) => {
+	try {
+		const userId = parseInt(req.params.userId);
+		const resourceId = parseInt(req.params.resourceId);
+
+		const store = new ResourceStore(req.app.locals.pool);
+		const hasAccess = await store.hasUserPurchasedAddOn(userId, resourceId);
+
+		return res.status(200).json({ has_access: hasAccess });
+	} catch (error) {
+		console.error('Check user add-on access error:', error);
+		return res.status(500).json({ error: 'Failed to check add-on access' });
+	}
+};
+
+/**
+ * Get user's purchased add-ons
+ * GET /users/:userId/resources/purchased
+ */
+const getUserPurchasedAddOns = async (req, res) => {
+	try {
+		const userId = parseInt(req.params.userId);
+
+		const store = new ResourceStore(req.app.locals.pool);
+		const addOns = await store.getUserPurchasedAddOns(userId);
+
+		return res.status(200).json(addOns);
+	} catch (error) {
+		console.error('Get user purchased add-ons error:', error);
+		return res
+			.status(500)
+			.json({ error: "Failed to retrieve user's purchased add-ons" });
+	}
+};
+
+/**
+ * Get user's accessible resources (free + purchased add-ons)
+ * GET /users/:userId/resources/accessible
+ */
+const getUserAccessibleResources = async (req, res) => {
+	try {
+		const userId = parseInt(req.params.userId);
+
+		const store = new ResourceStore(req.app.locals.pool);
+		const resources = await store.getUserAccessibleResources(userId);
+
+		return res.status(200).json(resources);
+	} catch (error) {
+		console.error('Get user accessible resources error:', error);
+		return res
+			.status(500)
+			.json({ error: "Failed to retrieve user's accessible resources" });
+	}
+};
+
+// ========================
+// ADMIN RESOURCE HANDLERS (Updated)
+// ========================
+
+/**
+ * Get all resources (admin view - includes drafts and add-ons)
  * GET /admin/resources
  */
 const adminIndex = async (req, res) => {
@@ -172,7 +292,7 @@ const adminIndex = async (req, res) => {
 };
 
 /**
- * Create new resource
+ * Create new resource (updated to support add-ons)
  * POST /admin/resources
  */
 const create = async (req, res) => {
@@ -194,7 +314,7 @@ const create = async (req, res) => {
 };
 
 /**
- * Update existing resource
+ * Update existing resource (updated to support add-ons)
  * PUT /admin/resources/:id
  */
 const update = async (req, res) => {
@@ -206,7 +326,7 @@ const update = async (req, res) => {
 		}
 
 		const store = new ResourceStore(req.app.locals.pool);
-		
+
 		// Get current resource for Cloudinary cleanup
 		const currentResource = await store.show(parseInt(req.params.id));
 		if (!currentResource) {
@@ -217,22 +337,43 @@ const update = async (req, res) => {
 
 		// Clean up old Cloudinary assets if they changed
 		const assetsToCheck = [
-			{ field: 'thumbnail', current: currentResource.thumbnail, new: req.body.thumbnail },
-			{ field: 'video_url', current: currentResource.video_url, new: req.body.video_url },
-			{ field: 'audio_url', current: currentResource.audio_url, new: req.body.audio_url }
+			{
+				field: 'thumbnail',
+				current: currentResource.thumbnail,
+				new: req.body.thumbnail,
+			},
+			{
+				field: 'video_url',
+				current: currentResource.video_url,
+				new: req.body.video_url,
+			},
+			{
+				field: 'audio_url',
+				current: currentResource.audio_url,
+				new: req.body.audio_url,
+			},
 		];
 
 		for (const asset of assetsToCheck) {
 			if (asset.current && asset.new && asset.current !== asset.new) {
 				try {
-					const { deleteImageDirect, extractPublicIdFromUrl } = require('./cloudinary');
+					const {
+						deleteImageDirect,
+						extractPublicIdFromUrl,
+					} = require('./cloudinary');
 					const publicId = extractPublicIdFromUrl(asset.current);
 					if (publicId) {
 						await deleteImageDirect(publicId);
-						console.log(`Deleted old Cloudinary resource ${asset.field}:`, publicId);
+						console.log(
+							`Deleted old Cloudinary resource ${asset.field}:`,
+							publicId
+						);
 					}
 				} catch (imageError) {
-					console.warn(`Failed to delete old Cloudinary resource ${asset.field}:`, imageError.message);
+					console.warn(
+						`Failed to delete old Cloudinary resource ${asset.field}:`,
+						imageError.message
+					);
 					// Don't fail the operation if image cleanup fails
 				}
 			}
@@ -246,13 +387,13 @@ const update = async (req, res) => {
 };
 
 /**
- * Delete resource
+ * Delete resource (unchanged)
  * DELETE /admin/resources/:id
  */
 const deleteResource = async (req, res) => {
 	try {
 		const store = new ResourceStore(req.app.locals.pool);
-		
+
 		// Get resource details before deletion for Cloudinary cleanup
 		const resourceToDelete = await store.show(parseInt(req.params.id));
 		if (!resourceToDelete) {
@@ -263,14 +404,20 @@ const deleteResource = async (req, res) => {
 
 		// Clean up Cloudinary assets if they exist
 		const cloudinaryAssets = [];
-		if (resourceToDelete.thumbnail) cloudinaryAssets.push(resourceToDelete.thumbnail);
-		if (resourceToDelete.video_url) cloudinaryAssets.push(resourceToDelete.video_url);
-		if (resourceToDelete.audio_url) cloudinaryAssets.push(resourceToDelete.audio_url);
+		if (resourceToDelete.thumbnail)
+			cloudinaryAssets.push(resourceToDelete.thumbnail);
+		if (resourceToDelete.video_url)
+			cloudinaryAssets.push(resourceToDelete.video_url);
+		if (resourceToDelete.audio_url)
+			cloudinaryAssets.push(resourceToDelete.audio_url);
 
 		if (cloudinaryAssets.length > 0) {
 			try {
-				const { deleteImageDirect, extractPublicIdFromUrl } = require('./cloudinary');
-				
+				const {
+					deleteImageDirect,
+					extractPublicIdFromUrl,
+				} = require('./cloudinary');
+
 				for (const assetUrl of cloudinaryAssets) {
 					const publicId = extractPublicIdFromUrl(assetUrl);
 					if (publicId) {
@@ -279,7 +426,10 @@ const deleteResource = async (req, res) => {
 					}
 				}
 			} catch (imageError) {
-				console.warn('Failed to delete Cloudinary resource assets:', imageError.message);
+				console.warn(
+					'Failed to delete Cloudinary resource assets:',
+					imageError.message
+				);
 				// Don't fail the operation if image cleanup fails
 			}
 		}
@@ -295,7 +445,7 @@ const deleteResource = async (req, res) => {
 };
 
 /**
- * Get resource statistics
+ * Get resource statistics (unchanged)
  * GET /admin/resources/stats
  */
 const getStats = async (req, res) => {
@@ -310,7 +460,7 @@ const getStats = async (req, res) => {
 };
 
 // ========================
-// MEDIA UPLOAD HANDLERS
+// MEDIA UPLOAD HANDLERS (unchanged)
 // ========================
 
 /**
@@ -401,31 +551,95 @@ const uploadImage = async (req, res) => {
 
 /**
  * Resource route handler - manages all resource-related endpoints
+ * Updated to include add-on endpoints and access control
  */
 const resources_route = (app) => {
-	// Public routes (no authentication required)
-	app.get('/resources', index);
+	// Public routes with optional authentication for purchase status
+	app.get(
+		'/resources',
+		(req, res, next) => {
+			const authHeader = req.headers.authorization;
+			if (authHeader && authHeader.startsWith('Bearer ')) {
+				authenticationToken(req, res, next);
+			} else {
+				next();
+			}
+		},
+		index
+	);
+
+	app.get(
+		'/resources/addons',
+		(req, res, next) => {
+			const authHeader = req.headers.authorization;
+			if (authHeader && authHeader.startsWith('Bearer ')) {
+				authenticationToken(req, res, next);
+			} else {
+				next();
+			}
+		},
+		getAddOns
+	);
+
 	app.get('/resources/authors', getAuthors);
-	app.get('/resources/search', search);
-	app.get('/resources/type/:type', getByType);
+	app.get(
+		'/resources/search',
+		(req, res, next) => {
+			const authHeader = req.headers.authorization;
+			if (authHeader && authHeader.startsWith('Bearer ')) {
+				authenticationToken(req, res, next);
+			} else {
+				next();
+			}
+		},
+		search
+	);
+
+	app.get(
+		'/resources/type/:type',
+		(req, res, next) => {
+			const authHeader = req.headers.authorization;
+			if (authHeader && authHeader.startsWith('Bearer ')) {
+				authenticationToken(req, res, next);
+			} else {
+				next();
+			}
+		},
+		getByType
+	);
+
 	app.get('/resources/author/:author', getByAuthor);
 	app.get('/resources/course/:courseId', getByCourse);
 
-	// Public route with optional authentication (for view counting and draft access)
+	// Resource detail with access control
 	app.get(
 		'/resources/:id',
 		(req, res, next) => {
-			// Try to authenticate but don't require it
 			const authHeader = req.headers.authorization;
 			if (authHeader && authHeader.startsWith('Bearer ')) {
-				// Apply authentication middleware if token is provided
 				authenticationToken(req, res, next);
 			} else {
-				// Continue without authentication
 				next();
 			}
 		},
 		show
+	);
+
+	// User-specific routes (require authentication)
+	app.get(
+		'/users/:userId/resources/purchased',
+		authenticateUserId,
+		getUserPurchasedAddOns
+	);
+	app.get(
+		'/users/:userId/resources/accessible',
+		authenticateUserId,
+		getUserAccessibleResources
+	);
+	app.get(
+		'/users/:userId/resources/:resourceId/access',
+		authenticateUserId,
+		checkUserAddOnAccess
 	);
 
 	// Admin-only routes

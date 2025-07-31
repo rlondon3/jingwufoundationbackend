@@ -304,6 +304,110 @@ const saveConversation = async (req, res) => {
 	}
 };
 
+// ========================
+// BADGE NOTIFICATION HANDLERS
+// ========================
+
+/**
+ * Get unread count for Sifu's Notes badge
+ * GET /users/:userId/sifu-notes/unread-count
+ */
+const getSifuNotesUnreadCount = async (req, res) => {
+	try {
+		const userId = parseInt(req.params.userId);
+		const store = new AIConversationStore(req.app.locals.pool);
+
+		// Get unread counts for both conversations and notes
+		const [conversationCount, notesCount] = await Promise.all([
+			store.getUnreadConversationCount(userId),
+			store.getUnreadNotesCount(userId)
+		]);
+
+		return res.status(200).json({
+			unread_conversations: conversationCount,
+			unread_notes: notesCount,
+			total_unread: conversationCount + notesCount
+		});
+	} catch (error) {
+		console.error('Get Sifu Notes unread count error:', error);
+		return res.status(500).json({ error: 'Failed to get unread count' });
+	}
+};
+
+/**
+ * Mark conversations as viewed
+ * PUT /users/:userId/sifu-notes/mark-conversations-viewed
+ */
+const markConversationsAsViewed = async (req, res) => {
+	try {
+		const userId = parseInt(req.params.userId);
+		const { conversation_ids } = req.body; // Optional: specific conversation IDs
+
+		const store = new AIConversationStore(req.app.locals.pool);
+		
+		if (conversation_ids && Array.isArray(conversation_ids)) {
+			// Mark specific conversations as viewed
+			await store.markConversationsAsViewed(userId, conversation_ids);
+		} else {
+			// Mark all user's conversations as viewed
+			await store.markAllConversationsAsViewed(userId);
+		}
+
+		return res.status(200).json({ message: 'Conversations marked as viewed' });
+	} catch (error) {
+		console.error('Mark conversations as viewed error:', error);
+		return res.status(500).json({ error: 'Failed to mark conversations as viewed' });
+	}
+};
+
+/**
+ * Mark notes as read
+ * PUT /users/:userId/sifu-notes/mark-notes-read
+ */
+const markNotesAsRead = async (req, res) => {
+	try {
+		const userId = parseInt(req.params.userId);
+		const { note_ids } = req.body; // Optional: specific note IDs
+
+		const store = new AIConversationStore(req.app.locals.pool);
+		
+		if (note_ids && Array.isArray(note_ids)) {
+			// Mark specific notes as read
+			await store.markNotesAsRead(userId, note_ids);
+		} else {
+			// Mark all user's notes as read
+			await store.markAllNotesAsRead(userId);
+		}
+
+		return res.status(200).json({ message: 'Notes marked as read' });
+	} catch (error) {
+		console.error('Mark notes as read error:', error);
+		return res.status(500).json({ error: 'Failed to mark notes as read' });
+	}
+};
+
+/**
+ * Mark all Sifu's Notes items as read/viewed (sidebar click handler)
+ * PUT /users/:userId/sifu-notes/mark-all-read
+ */
+const markAllSifuNotesAsRead = async (req, res) => {
+	try {
+		const userId = parseInt(req.params.userId);
+		const store = new AIConversationStore(req.app.locals.pool);
+
+		// Mark both conversations and notes as read/viewed
+		await Promise.all([
+			store.markAllConversationsAsViewed(userId),
+			store.markAllNotesAsRead(userId)
+		]);
+
+		return res.status(200).json({ message: 'All Sifu Notes marked as read' });
+	} catch (error) {
+		console.error('Mark all Sifu Notes as read error:', error);
+		return res.status(500).json({ error: 'Failed to mark all as read' });
+	}
+};
+
 /**
  * AI Conversation route handler - manages all conversation history endpoints
  */
@@ -328,6 +432,28 @@ const ai_conversations_route = (app) => {
 		'/users/:userId/ai-conversations/stats',
 		authenticateUserId,
 		getUserConversationStats
+	);
+
+	// Badge notification routes
+	app.get(
+		'/users/:userId/sifu-notes/unread-count', 
+		authenticateUserId,
+		getSifuNotesUnreadCount
+	);
+	app.put(
+		'/users/:userId/sifu-notes/mark-conversations-viewed',
+		authenticateUserId,
+		markConversationsAsViewed
+	);
+	app.put(
+		'/users/:userId/sifu-notes/mark-notes-read',
+		authenticateUserId,
+		markNotesAsRead
+	);
+	app.put(
+		'/users/:userId/sifu-notes/mark-all-read',
+		authenticateUserId,
+		markAllSifuNotesAsRead
 	);
 
 	// Individual conversation routes

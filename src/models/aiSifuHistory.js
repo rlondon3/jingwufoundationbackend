@@ -301,6 +301,165 @@ class AIConversationStore {
 			throw new Error(`Could not clean old conversations: ${error}`);
 		}
 	}
+
+	// ========================
+	// BADGE NOTIFICATION METHODS
+	// ========================
+
+	/**
+	 * Get count of unread conversations for a user
+	 */
+	async getUnreadConversationCount(userId) {
+		try {
+			const sql = `
+				SELECT COUNT(*) as unread_count
+				FROM ai_conversation_history
+				WHERE user_id = $1 AND is_viewed = FALSE
+			`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [userId]);
+			client.release();
+			return parseInt(res.rows[0].unread_count) || 0;
+		} catch (error) {
+			throw new Error(`Could not get unread conversation count: ${error}`);
+		}
+	}
+
+	/**
+	 * Get count of unread notes for a user
+	 */
+	async getUnreadNotesCount(userId) {
+		try {
+			const sql = `
+				SELECT COUNT(*) as unread_count
+				FROM student_notes
+				WHERE user_id = $1 AND is_read = FALSE
+			`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [userId]);
+			client.release();
+			return parseInt(res.rows[0].unread_count) || 0;
+		} catch (error) {
+			throw new Error(`Could not get unread notes count: ${error}`);
+		}
+	}
+
+	/**
+	 * Mark specific conversations as viewed
+	 */
+	async markConversationsAsViewed(userId, conversationIds) {
+		try {
+			const sql = `
+				UPDATE ai_conversation_history 
+				SET is_viewed = TRUE 
+				WHERE user_id = $1 AND id = ANY($2::int[])
+			`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [userId, conversationIds]);
+			client.release();
+			return res.rowCount;
+		} catch (error) {
+			throw new Error(`Could not mark conversations as viewed: ${error}`);
+		}
+	}
+
+	/**
+	 * Mark all conversations as viewed for a user
+	 */
+	async markAllConversationsAsViewed(userId) {
+		try {
+			const sql = `
+				UPDATE ai_conversation_history 
+				SET is_viewed = TRUE 
+				WHERE user_id = $1 AND is_viewed = FALSE
+			`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [userId]);
+			client.release();
+			return res.rowCount;
+		} catch (error) {
+			throw new Error(`Could not mark all conversations as viewed: ${error}`);
+		}
+	}
+
+	/**
+	 * Mark specific notes as read
+	 */
+	async markNotesAsRead(userId, noteIds) {
+		try {
+			const sql = `
+				UPDATE student_notes 
+				SET is_read = TRUE 
+				WHERE user_id = $1 AND id = ANY($2::int[])
+			`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [userId, noteIds]);
+			client.release();
+			return res.rowCount;
+		} catch (error) {
+			throw new Error(`Could not mark notes as read: ${error}`);
+		}
+	}
+
+	/**
+	 * Mark all notes as read for a user
+	 */
+	async markAllNotesAsRead(userId) {
+		try {
+			const sql = `
+				UPDATE student_notes 
+				SET is_read = TRUE 
+				WHERE user_id = $1 AND is_read = FALSE
+			`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [userId]);
+			client.release();
+			return res.rowCount;
+		} catch (error) {
+			throw new Error(`Could not mark all notes as read: ${error}`);
+		}
+	}
+
+	/**
+	 * Get conversations with unread status for display (includes badge info)
+	 */
+	async getUserConversationsWithBadges(userId, limit = 20, offset = 0) {
+		try {
+			const sql = `
+				SELECT 
+					id,
+					user_id,
+					question_text,
+					response_text,
+					course_context,
+					cost_cents,
+					response_time_ms,
+					cached_response,
+					session_id,
+					is_viewed,
+					created_at,
+					c.title as course_title
+				FROM ai_conversation_history ach
+				LEFT JOIN courses c ON ach.course_context = c.id
+				WHERE ach.user_id = $1
+				ORDER BY ach.created_at DESC
+				LIMIT $2 OFFSET $3
+			`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [userId, limit, offset]);
+			client.release();
+			return res.rows;
+		} catch (error) {
+			throw new Error(`Could not get user conversations with badges: ${error}`);
+		}
+	}
 }
 
 /**

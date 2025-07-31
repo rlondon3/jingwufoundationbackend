@@ -25,7 +25,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
  */
 const createCheckout = async (req, res) => {
 	try {
-		const { price_id, success_url, cancel_url, mode, course_id, course_price } = req.body;
+		const { price_id, success_url, cancel_url, mode, course_id, course_price, resource_id, resource_price, ai_sifu_subscription, ai_sifu_price } = req.body;
 		const userId = req.user.id;
 
 		if (!userId) {
@@ -40,9 +40,14 @@ const createCheckout = async (req, res) => {
 			return res.status(400).json({ error: 'Invalid mode' });
 		}
 
-		// For course purchases, we need either a price_id or course_id + course_price
-		if (mode === 'payment' && !price_id && (!course_id || !course_price)) {
-			return res.status(400).json({ error: 'For course purchases, provide either price_id or course_id + course_price' });
+		// For purchases, we need either a price_id, course_id + course_price, resource_id + resource_price, or ai_sifu_subscription + ai_sifu_price
+		if (mode === 'payment' && !price_id && (!course_id || !course_price) && (!resource_id || !resource_price) && !ai_sifu_subscription) {
+			return res.status(400).json({ error: 'For purchases, provide either price_id, course_id + course_price, resource_id + resource_price, or ai_sifu_subscription + ai_sifu_price' });
+		}
+		
+		// For AI Sifu subscriptions, we need ai_sifu_price
+		if (mode === 'subscription' && ai_sifu_subscription && !ai_sifu_price) {
+			return res.status(400).json({ error: 'For AI Sifu subscriptions, ai_sifu_price is required' });
 		}
 
 		// Initialize stores
@@ -113,6 +118,62 @@ const createCheckout = async (req, res) => {
 					quantity: 1,
 				},
 			];
+		} else if (resource_price) {
+			// Get resource details for better product naming
+			let resourceName = `Resource ${resource_id}`;
+			let resourceType = 'resource';
+			try {
+				const resourceQuery = await req.app.locals.pool.query(
+					'SELECT title, type FROM resources WHERE id = $1',
+					[resource_id]
+				);
+				if (resourceQuery.rows.length > 0) {
+					resourceName = resourceQuery.rows[0].title;
+					resourceType = resourceQuery.rows[0].type;
+				}
+			} catch (error) {
+				console.error('Error fetching resource title:', error);
+				// Continue with default name
+			}
+
+			// Create dynamic price for resource add-on
+			lineItems = [
+				{
+					price_data: {
+						currency: 'usd',
+						product_data: {
+							name: resourceName,
+							description: `Access to ${resourceName} ${resourceType === 'manual' ? 'manual' : resourceType} content`,
+							metadata: {
+								resource_id: resource_id.toString(),
+							},
+						},
+						unit_amount: Math.round(resource_price * 100), // Convert to cents
+					},
+					quantity: 1,
+				},
+			];
+		} else if (ai_sifu_subscription && ai_sifu_price) {
+			// Create dynamic price for AI Sifu subscription
+			lineItems = [
+				{
+					price_data: {
+						currency: 'usd',
+						product_data: {
+							name: 'AI Sifu Monthly Subscription',
+							description: 'Get unlimited access to your personal AI martial arts guide with 12 questions monthly',
+							metadata: {
+								is_ai_sifu_subscription: 'true',
+							},
+						},
+						unit_amount: Math.round(ai_sifu_price * 100), // Convert to cents
+						recurring: {
+							interval: 'month',
+						},
+					},
+					quantity: 1,
+				},
+			];
 		}
 
 		// Create checkout session
@@ -125,21 +186,45 @@ const createCheckout = async (req, res) => {
 			cancel_url,
 			metadata: {
 				course_id: course_id?.toString() || '',
+				resource_id: resource_id?.toString() || '',
 				user_id: userId.toString(),
+				is_ai_sifu_subscription: ai_sifu_subscription ? 'true' : 'false',
 			},
 		});
 
-		const orderStore = new OrderStore(req.app.locals.pool);
+		let order = null;
+		
+		// Only create orders for course/resource purchases, not AI Sifu subscriptions
+		if (!ai_sifu_subscription) {
+			const orderStore = new OrderStore(req.app.locals.pool);
 
-		const order = await orderStore.create({
-			user_id: userId,
-			course_id: course_id,
-			order_status: 'pending',
-			payment_method: 'stripe',
-			stripe_checkout_session_id: session.id,
+			if (resource_id) {
+				// Create add-on order for resource (linked to course)
+				order = await orderStore.createAddOnOrder({
+					user_id: userId,
+					course_id: course_id,
+					resource_id: resource_id,
+					order_status: 'pending',
+					payment_method: 'stripe',
+					stripe_checkout_session_id: session.id,
+				});
+			} else {
+				// Create regular course order
+				order = await orderStore.create({
+					user_id: userId,
+					course_id: course_id,
+					order_status: 'pending',
+					payment_method: 'stripe',
+					stripe_checkout_session_id: session.id,
+				});
+			}
+		}
+
+		res.json({ 
+			sessionId: session.id, 
+			url: session.url, 
+			orderId: order?.id || null 
 		});
-
-		res.json({ sessionId: session.id, url: session.url, orderId: order.id });
 	} catch (error) {
 		console.error('Checkout error:', error);
 		res.status(500).json({ error: 'Failed to create checkout session' });
@@ -152,23 +237,29 @@ const createCheckout = async (req, res) => {
  */
 const webhook = async (req, res) => {
 	try {
+		console.log('🔔 Webhook received:', req.headers['stripe-signature'] ? 'with signature' : 'without signature');
+		
 		const sig = req.headers['stripe-signature'];
 		const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
 		let event;
 		try {
 			event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+			console.log('✅ Webhook verified, event type:', event.type);
 		} catch (err) {
-			console.error('Webhook signature verification failed:', err.message);
+			console.error('❌ Webhook signature verification failed:', err.message);
 			return res.status(400).send(`Webhook Error: ${err.message}`);
 		}
 
+		console.log('📧 Processing webhook event:', event.type, 'ID:', event.id);
+		
 		// Handle the event
 		await handleStripeEvent(event, req.app.locals.pool);
 
+		console.log('✅ Webhook processed successfully');
 		res.json({ received: true });
 	} catch (error) {
-		console.error('Webhook error:', error);
+		console.error('❌ Webhook error:', error);
 		res.status(500).json({ error: 'Webhook processing failed' });
 	}
 };
@@ -237,7 +328,7 @@ const getOrders = async (req, res) => {
  */
 const verifyPayment = async (req, res) => {
 	try {
-		const { session_id, course_id } = req.body;
+		const { session_id, course_id, resource_id } = req.body;
 		const userId = req.user.id;
 
 		if (!session_id) {
@@ -261,14 +352,16 @@ const verifyPayment = async (req, res) => {
 				return res.json({ 
 					success: true, 
 					order_id: completedOrder.id,
-					enrolled: true 
+					enrolled: true,
+					resource_access: resource_id ? true : false
 				});
 			} catch (error) {
 				// Order might already be completed
 				return res.json({ 
 					success: true, 
 					message: 'Payment already processed',
-					enrolled: true 
+					enrolled: true,
+					resource_access: resource_id ? true : false
 				});
 			}
 		} else {
@@ -347,7 +440,104 @@ async function handleStripeEvent(event, pool) {
 	}
 
 	if (isSubscription) {
-			await syncCustomerFromStripe(customerId, pool);
+		await syncCustomerFromStripe(customerId, pool);
+		
+		// Handle subscription events
+		if ((event.type === 'checkout.session.completed' && stripeData.subscription) ||
+			event.type.startsWith('customer.subscription.')) {
+			try {
+				// Get subscription ID based on event type
+				let subscriptionId;
+				let userId;
+				
+				if (event.type === 'checkout.session.completed') {
+					subscriptionId = stripeData.subscription;
+					userId = parseInt(stripeData.metadata.user_id);
+				} else if (event.type.startsWith('customer.subscription.')) {
+					subscriptionId = stripeData.id;
+					// For subscription events, get user from customer
+					const customerQuery = await pool.query(
+						'SELECT user_id FROM stripe_customers WHERE customer_id = $1',
+						[customerId]
+					);
+					if (customerQuery.rows.length === 0) {
+						console.log('❌ No user found for customer:', customerId);
+						return;
+					}
+					userId = customerQuery.rows[0].user_id;
+					console.log('👤 Found user', userId, 'for subscription event:', event.type);
+				}
+				
+				// Get the subscription details from Stripe
+				const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+				
+				// Determine subscription type and details
+				let subscriptionType = 'general';
+				let resourceId = null;
+				let metadata = {};
+				
+				if (event.type === 'checkout.session.completed' && stripeData.metadata?.is_ai_sifu_subscription === 'true') {
+					subscriptionType = 'ai_sifu';
+					metadata = { 
+						description: 'AI Sifu Monthly Subscription',
+						features: ['12 questions per month', 'Personal AI martial arts guide']
+					};
+				} else if (event.type === 'checkout.session.completed' && stripeData.metadata?.course_id) {
+					subscriptionType = 'course';
+					resourceId = parseInt(stripeData.metadata.course_id);
+				} else if (event.type.startsWith('customer.subscription.')) {
+					// For subscription events, determine type from product name
+					const productName = subscription.items.data[0]?.price?.product?.name || 
+					                   subscription.items.data[0]?.price?.nickname || '';
+					
+					if (productName.includes('AI Sifu') || productName.includes('ai_sifu')) {
+						subscriptionType = 'ai_sifu';
+						metadata = { 
+							description: 'AI Sifu Monthly Subscription',
+							features: ['12 questions per month', 'Personal AI martial arts guide']
+						};
+					}
+					console.log('🔍 Detected subscription type:', subscriptionType, 'from product:', productName);
+				}
+				
+				// Create subscription record in general subscriptions table
+				const subscriptionSql = `
+					INSERT INTO subscriptions (
+						user_id, stripe_subscription_id, subscription_type, resource_id, 
+						status, current_period_start, current_period_end, cancel_at_period_end,
+						price_cents, metadata
+					)
+					VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+					ON CONFLICT (stripe_subscription_id) 
+					DO UPDATE SET 
+						status = EXCLUDED.status,
+						current_period_start = EXCLUDED.current_period_start,
+						current_period_end = EXCLUDED.current_period_end,
+						cancel_at_period_end = EXCLUDED.cancel_at_period_end,
+						updated_at = CURRENT_TIMESTAMP
+				`;
+				
+				// Calculate price in cents from subscription
+				const priceCents = subscription.items.data[0]?.price?.unit_amount || 0;
+				
+				await pool.query(subscriptionSql, [
+					userId,
+					subscription.id,
+					subscriptionType,
+					resourceId,
+					subscription.status,
+					new Date(subscription.current_period_start * 1000),
+					new Date(subscription.current_period_end * 1000),
+					subscription.cancel_at_period_end,
+					priceCents,
+					JSON.stringify(metadata)
+				]);
+				
+				console.log(`${subscriptionType} subscription activated for user ${userId}: ${subscription.id}`);
+			} catch (error) {
+				console.error('Error activating subscription:', error);
+			}
+		}
 	}
 }
 

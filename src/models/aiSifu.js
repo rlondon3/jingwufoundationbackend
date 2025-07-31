@@ -50,7 +50,20 @@ class AISifuStore {
 		try {
 			const client = await this.pool.connect();
 
-			// Get user info
+			// Get system settings
+			const settings = await this.getAiSifuSettings();
+			
+			// Check if AI Sifu is globally enabled
+			if (!settings.enabled) {
+				client.release();
+				return {
+					canAsk: false,
+					reason: 'ai_sifu_disabled',
+					message: 'AI Sifu is currently disabled by administrator'
+				};
+			}
+
+			// Get user info and preferences
 			const userSql = 'SELECT is_admin FROM users WHERE id = $1';
 			const userRes = await client.query(userSql, [userId]);
 
@@ -60,6 +73,17 @@ class AISifuStore {
 			}
 
 			const user = userRes.rows[0];
+			const userPrefs = await this.getUserPreferences(userId);
+
+			// Check if user has AI Sifu enabled in their preferences
+			if (!userPrefs.ai_sifu_enabled) {
+				client.release();
+				return {
+					canAsk: false,
+					reason: 'user_disabled',
+					message: 'AI Sifu is disabled in your preferences'
+				};
+			}
 
 			// Admin has unlimited access
 			if (user.is_admin) {
@@ -70,97 +94,56 @@ class AISifuStore {
 			// Get usage data
 			const usage = await this.getUserUsage(userId);
 
-			// Check if user has active subscription
+			// Check if user has active AI Sifu subscription
 			const subscriptionSql = `
-        SELECT ss.status FROM stripe_subscriptions ss
-        JOIN stripe_customers sc ON ss.customer_id = sc.customer_id
-        WHERE sc.user_id = $1 AND ss.status = 'active'
-      `;
+				SELECT status, current_period_end, current_period_start 
+				FROM subscriptions 
+				WHERE user_id = $1 
+				AND subscription_type = 'ai_sifu' 
+				AND status = 'active'
+				AND current_period_end > NOW()
+				LIMIT 1
+			`;
 			const subRes = await client.query(subscriptionSql, [userId]);
-			const hasActiveSubscription = subRes.rows.length > 0;
-
-			if (hasActiveSubscription) {
-				// Subscriber limit: 100 per month
-				if (usage.subscription_usage >= 100) {
+			
+			if (subRes.rows.length > 0) {
+				// User has active AI Sifu subscription
+				if (usage.subscription_usage >= settings.subscriber_limit) {
 					client.release();
 					return {
 						canAsk: false,
 						reason: 'subscription_limit_reached',
-						limit: 100,
+						limit: settings.subscriber_limit,
 						used: usage.subscription_usage,
+						courseId
 					};
 				}
 				client.release();
-				return { canAsk: true, reason: 'subscription_access' };
+				return { canAsk: true, reason: 'subscription_access', courseId };
 			}
 
-			// Check course access (purchase OR enrollment)
-			if (courseId) {
-				// Check if user purchased the specific course
-				const purchaseSql = `
-          SELECT id FROM orders 
-          WHERE user_id = $1 AND course_id = $2 AND order_status = 'completed'
-        `;
-				const purchaseRes = await client.query(purchaseSql, [userId, courseId]);
-
-				// Also check if user is enrolled in the specific course
-				const enrollmentSql = `
-          SELECT id FROM user_courses 
-          WHERE user_id = $1 AND course_id = $2
-        `;
-				const enrollmentRes = await client.query(enrollmentSql, [userId, courseId]);
-
-				// User has access if they purchased OR are enrolled in this specific course
-				if (purchaseRes.rows.length > 0 || enrollmentRes.rows.length > 0) {
-					const courseUsage = usage.course_purchases_usage[courseId] || 0;
-					if (courseUsage >= 10) {
-						client.release();
-						return {
-							canAsk: false,
-							reason: 'course_limit_reached',
-							courseId,
-							limit: 10,
-							used: courseUsage,
-						};
-					}
-					client.release();
-					return { 
-						canAsk: true, 
-						reason: purchaseRes.rows.length > 0 ? 'course_purchase_access' : 'course_enrollment_access' 
-					};
-				}
-			} else {
-				// No specific course ID provided - check if user has access to ANY course
-				const anyPurchaseSql = `
-          SELECT DISTINCT course_id FROM orders 
-          WHERE user_id = $1 AND order_status = 'completed'
-          LIMIT 1
-        `;
-				const anyPurchaseRes = await client.query(anyPurchaseSql, [userId]);
-
-				const anyEnrollmentSql = `
-          SELECT DISTINCT course_id FROM user_courses 
-          WHERE user_id = $1
-          LIMIT 1
-        `;
-				const anyEnrollmentRes = await client.query(anyEnrollmentSql, [userId]);
-
-
-				// User has general access if they have ANY course purchase OR enrollment
-				if (anyPurchaseRes.rows.length > 0 || anyEnrollmentRes.rows.length > 0) {
-					client.release();
-					return { 
-						canAsk: true, 
-						reason: anyPurchaseRes.rows.length > 0 ? 'general_course_purchase_access' : 'general_course_enrollment_access' 
-					};
-				}
+			// Check global free questions (priority for all users)
+			const globalUsage = usage.global_free_usage || 0;
+			console.log(`Checking global free access for user ${userId}: used=${globalUsage}, limit=${settings.global_free_limit}`);
+			if (globalUsage < settings.global_free_limit) {
+				console.log(`Granting global_free_access to user ${userId}`);
+				client.release();
+				return { 
+					canAsk: true, 
+					reason: 'global_free_access',
+					remaining: settings.global_free_limit - globalUsage,
+					limit: settings.global_free_limit,
+					used: globalUsage
+				};
 			}
 
 			client.release();
 			return {
 				canAsk: false,
-				reason: 'no_access',
-				message: 'Purchase a course or subscribe to access AI Sifu',
+				reason: 'no_questions_remaining',
+				message: 'You have used all your free questions. Subscribe to AI Sifu or purchase a course to continue.',
+				global_free_used: globalUsage,
+				global_free_limit: settings.global_free_limit
 			};
 		} catch (error) {
 			throw new Error(`Could not check user access: ${error}`);
@@ -170,48 +153,48 @@ class AISifuStore {
 	/**
 	 * Record AI question usage
 	 */
-	async recordUsage(userId, costCents, courseId = null) {
+	async recordUsage(userId, costCents, courseId = null, accessReason = null) {
 		try {
 			const currentPeriod = this.getCurrentPeriod();
-
 			const client = await this.pool.connect();
 
-			// Get current usage
-			let usage = await this.getUserUsage(userId);
+			// Debug logging to track usage recording
+			console.log(`Recording usage for user ${userId}: accessReason=${accessReason}, courseId=${courseId}, costCents=${costCents}`);
 
-			// Update usage counts
-			if (courseId) {
-				const courseUsage = usage.course_purchases_usage || {};
-				courseUsage[courseId] = (courseUsage[courseId] || 0) + 1;
-
+			// Determine which usage counter to increment based on access reason
+			if (accessReason === 'global_free_access') {
+				// Increment global free usage
+				console.log(`Incrementing global_free_usage for user ${userId}`);
 				const sql = `
-          UPDATE ai_usage_tracking 
-          SET course_purchases_usage = $1, total_cost_cents = total_cost_cents + $2, updated_at = CURRENT_TIMESTAMP
-          WHERE user_id = $3 AND period_start = $4
-          RETURNING *
-        `;
+					UPDATE ai_usage_tracking 
+					SET global_free_usage = global_free_usage + 1, total_cost_cents = total_cost_cents + $1, updated_at = CURRENT_TIMESTAMP
+					WHERE user_id = $2 AND period_start = $3
+					RETURNING *
+				`;
 
-				const res = await client.query(sql, [
-					JSON.stringify(courseUsage),
-					costCents,
-					userId,
-					currentPeriod,
-				]);
-
+				const res = await client.query(sql, [costCents, userId, currentPeriod]);
+				console.log(`Global free usage updated. New global_free_usage: ${res.rows[0]?.global_free_usage}`);
 				client.release();
 				return res.rows[0];
-			} else {
-				// Subscription usage
+
+			} else if (accessReason === 'subscription_access' || accessReason === 'admin_unlimited') {
+				// Increment subscription usage
 				const sql = `
-          UPDATE ai_usage_tracking 
-          SET subscription_usage = subscription_usage + 1, total_cost_cents = total_cost_cents + $1, updated_at = CURRENT_TIMESTAMP
-          WHERE user_id = $2 AND period_start = $3
-          RETURNING *
-        `;
+					UPDATE ai_usage_tracking 
+					SET subscription_usage = subscription_usage + 1, total_cost_cents = total_cost_cents + $1, updated_at = CURRENT_TIMESTAMP
+					WHERE user_id = $2 AND period_start = $3
+					RETURNING *
+				`;
 
 				const res = await client.query(sql, [costCents, userId, currentPeriod]);
 				client.release();
 				return res.rows[0];
+
+			} else {
+				// Unknown access reason - log error and don't increment any counter
+				console.error(`Unknown access reason: ${accessReason} for user ${userId}. Not recording usage.`);
+				client.release();
+				throw new Error(`Unknown access reason: ${accessReason}`);
 			}
 		} catch (error) {
 			throw new Error(`Could not record usage: ${error}`);
@@ -408,8 +391,8 @@ class AISifuStore {
 	async createUsageRecord(userId, periodStart) {
 		try {
 			const sql = `
-        INSERT INTO ai_usage_tracking (user_id, period_start, course_purchases_usage, subscription_usage, total_cost_cents)
-        VALUES ($1, $2, '{}', 0, 0)
+        INSERT INTO ai_usage_tracking (user_id, period_start, course_purchases_usage, subscription_usage, global_free_usage, total_cost_cents)
+        VALUES ($1, $2, '{}', 0, 0, 0)
         RETURNING *
       `;
 
@@ -464,6 +447,143 @@ class AISifuStore {
 		} catch (error) {
 			// Don't throw error for cache usage updates
 			console.error('Failed to increment cache usage:', error);
+		}
+	}
+
+	// ========================
+	// SYSTEM SETTINGS OPERATIONS
+	// ========================
+
+	/**
+	 * Get system setting value
+	 */
+	async getSystemSetting(key, defaultValue = null) {
+		try {
+			const sql = `SELECT setting_value FROM system_settings WHERE setting_key = $1`;
+			
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [key]);
+			client.release();
+
+			if (res.rows.length > 0) {
+				const value = res.rows[0].setting_value;
+				// Try to parse as number, boolean, or return as string
+				if (value === 'true') return true;
+				if (value === 'false') return false;
+				if (!isNaN(value) && !isNaN(parseFloat(value))) return parseFloat(value);
+				return value;
+			}
+
+			return defaultValue;
+		} catch (error) {
+			console.error(`Failed to get system setting ${key}:`, error);
+			return defaultValue;
+		}
+	}
+
+	/**
+	 * Set system setting value
+	 */
+	async setSystemSetting(key, value, description = null) {
+		try {
+			const sql = `
+				INSERT INTO system_settings (setting_key, setting_value, description, updated_at)
+				VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+				ON CONFLICT (setting_key) 
+				DO UPDATE SET 
+					setting_value = EXCLUDED.setting_value,
+					description = COALESCE(EXCLUDED.description, system_settings.description),
+					updated_at = CURRENT_TIMESTAMP
+				RETURNING *
+			`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [key, String(value), description]);
+			client.release();
+
+			return res.rows[0];
+		} catch (error) {
+			throw new Error(`Could not set system setting: ${error}`);
+		}
+	}
+
+	/**
+	 * Get all AI Sifu system settings
+	 */
+	async getAiSifuSettings() {
+		try {
+			const settings = {};
+			settings.enabled = await this.getSystemSetting('ai_sifu_enabled', true);
+			settings.global_free_limit = await this.getSystemSetting('global_free_questions_limit', 3);
+			settings.course_limit = await this.getSystemSetting('course_questions_limit', 10);
+			settings.subscriber_limit = await this.getSystemSetting('subscriber_questions_limit', 12);
+			settings.price_cents = await this.getSystemSetting('ai_sifu_price_cents', 1000);
+
+			return settings;
+		} catch (error) {
+			throw new Error(`Could not get AI Sifu settings: ${error}`);
+		}
+	}
+
+	// ========================
+	// USER PREFERENCES OPERATIONS
+	// ========================
+
+	/**
+	 * Get user preferences
+	 */
+	async getUserPreferences(userId) {
+		try {
+			const sql = `
+				SELECT * FROM user_preferences WHERE user_id = $1
+			`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [userId]);
+			client.release();
+
+			if (res.rows.length > 0) {
+				return res.rows[0];
+			}
+
+			// Return defaults if no preferences exist
+			return {
+				user_id: userId,
+				ai_sifu_enabled: true,
+				email_notifications: true
+			};
+		} catch (error) {
+			throw new Error(`Could not get user preferences: ${error}`);
+		}
+	}
+
+	/**
+	 * Set user preferences
+	 */
+	async setUserPreferences(userId, preferences) {
+		try {
+			const sql = `
+				INSERT INTO user_preferences (user_id, ai_sifu_enabled, email_notifications, updated_at)
+				VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+				ON CONFLICT (user_id) 
+				DO UPDATE SET 
+					ai_sifu_enabled = EXCLUDED.ai_sifu_enabled,
+					email_notifications = EXCLUDED.email_notifications,
+					updated_at = CURRENT_TIMESTAMP
+				RETURNING *
+			`;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [
+				userId,
+				preferences.ai_sifu_enabled !== undefined ? preferences.ai_sifu_enabled : true,
+				preferences.email_notifications !== undefined ? preferences.email_notifications : true
+			]);
+			client.release();
+
+			return res.rows[0];
+		} catch (error) {
+			throw new Error(`Could not set user preferences: ${error}`);
 		}
 	}
 }

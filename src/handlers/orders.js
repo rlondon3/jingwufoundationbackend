@@ -9,6 +9,7 @@ const {
 
 /**
  * Order Handlers - All business logic for order operations
+ * Supports both course purchases and add-on resource purchases
  */
 
 // ========================
@@ -16,7 +17,7 @@ const {
 // ========================
 
 /**
- * Get all orders (admin view)
+ * Get all orders (admin view) - includes both courses and add-ons
  * GET /orders
  */
 const index = async (req, res) => {
@@ -51,7 +52,7 @@ const show = async (req, res) => {
 };
 
 /**
- * Create new order (course purchase initiation)
+ * Create new course order (existing flow - unchanged)
  * POST /orders
  */
 const create = async (req, res) => {
@@ -73,7 +74,29 @@ const create = async (req, res) => {
 };
 
 /**
- * Update order status
+ * Create new add-on order (new endpoint)
+ * POST /orders/addons
+ */
+const createAddOnOrder = async (req, res) => {
+	try {
+		// Validate add-on order data
+		const { error } = validateOrder({ ...req.body, is_add_on: true });
+		if (error) {
+			return res.status(400).json({ error: error.details[0].message });
+		}
+
+		const store = new OrderStore(req.app.locals.pool);
+		const newOrder = await store.createAddOnOrder(req.body);
+
+		return res.status(201).json(newOrder);
+	} catch (error) {
+		console.error('Create add-on order error:', error);
+		return res.status(500).json({ error: 'Failed to create add-on order' });
+	}
+};
+
+/**
+ * Update order status (works for both course and add-on orders)
  * PUT /orders/:id/status
  */
 const updateStatus = async (req, res) => {
@@ -196,11 +219,71 @@ const linkToStripeSession = async (req, res) => {
 };
 
 // ========================
-// USER ORDER HANDLERS
+// ADD-ON SPECIFIC HANDLERS
 // ========================
 
 /**
- * Get user's orders
+ * Get all add-on orders (admin view)
+ * GET /orders/addons
+ */
+const getAddOnOrders = async (req, res) => {
+	try {
+		const store = new OrderStore(req.app.locals.pool);
+		const orders = await store.getAddOnOrders();
+		return res.status(200).json(orders);
+	} catch (error) {
+		console.error('Get add-on orders error:', error);
+		return res.status(500).json({ error: 'Failed to retrieve add-on orders' });
+	}
+};
+
+/**
+ * Check if user has purchased specific add-on
+ * GET /users/:userId/addons/:resourceId/purchased
+ */
+const checkUserAddOnPurchase = async (req, res) => {
+	try {
+		const userId = parseInt(req.params.userId);
+		const resourceId = parseInt(req.params.resourceId);
+
+		const store = new OrderStore(req.app.locals.pool);
+		const hasPurchased = await store.hasUserPurchasedAddOn(userId, resourceId);
+
+		return res.status(200).json({ has_purchased: hasPurchased });
+	} catch (error) {
+		console.error('Check user add-on purchase error:', error);
+		return res
+			.status(500)
+			.json({ error: 'Failed to check add-on purchase status' });
+	}
+};
+
+/**
+ * Get user's purchased add-ons
+ * GET /users/:userId/addons/purchased
+ */
+const getUserPurchasedAddOns = async (req, res) => {
+	try {
+		const userId = parseInt(req.params.userId);
+
+		const store = new OrderStore(req.app.locals.pool);
+		const addOns = await store.getUserPurchasedAddOns(userId);
+
+		return res.status(200).json(addOns);
+	} catch (error) {
+		console.error('Get user purchased add-ons error:', error);
+		return res
+			.status(500)
+			.json({ error: "Failed to retrieve user's purchased add-ons" });
+	}
+};
+
+// ========================
+// USER ORDER HANDLERS (Updated)
+// ========================
+
+/**
+ * Get user's orders (courses and add-ons)
  * GET /users/:userId/orders
  */
 const getUserOrders = async (req, res) => {
@@ -218,7 +301,7 @@ const getUserOrders = async (req, res) => {
 };
 
 /**
- * Get user's purchases (completed orders)
+ * Get user's purchases (completed orders - courses and add-ons)
  * GET /users/:userId/purchases
  */
 const getUserPurchases = async (req, res) => {
@@ -236,7 +319,7 @@ const getUserPurchases = async (req, res) => {
 };
 
 /**
- * Check if user has purchased a course
+ * Check if user has purchased a course (unchanged)
  * GET /users/:userId/courses/:courseId/purchased
  */
 const checkUserPurchase = async (req, res) => {
@@ -255,11 +338,11 @@ const checkUserPurchase = async (req, res) => {
 };
 
 // ========================
-// ANALYTICS HANDLERS
+// ANALYTICS HANDLERS (Updated)
 // ========================
 
 /**
- * Get successful orders (admin analytics)
+ * Get successful orders (admin analytics) - includes both courses and add-ons
  * GET /orders/successful
  */
 const getSuccessfulOrders = async (req, res) => {
@@ -277,7 +360,7 @@ const getSuccessfulOrders = async (req, res) => {
 };
 
 /**
- * Get order statistics
+ * Get order statistics (updated with add-on metrics)
  * GET /orders/stats
  */
 const getOrderStats = async (req, res) => {
@@ -295,7 +378,7 @@ const getOrderStats = async (req, res) => {
 };
 
 /**
- * Get revenue by date range
+ * Get revenue by date range (updated with add-on revenue)
  * GET /orders/revenue?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
  */
 const getRevenueByDateRange = async (req, res) => {
@@ -319,7 +402,7 @@ const getRevenueByDateRange = async (req, res) => {
 };
 
 /**
- * Get top selling courses
+ * Get top selling courses (unchanged)
  * GET /orders/top-courses?limit=10
  */
 const getTopSellingCourses = async (req, res) => {
@@ -343,11 +426,37 @@ const getTopSellingCourses = async (req, res) => {
 };
 
 /**
+ * Get top selling add-ons (new endpoint)
+ * GET /orders/top-addons?limit=10
+ */
+const getTopSellingAddOns = async (req, res) => {
+	try {
+		const limit = parseInt(req.query.limit) || 10;
+
+		if (limit <= 0 || limit > 100) {
+			return res.status(400).json({ error: 'Limit must be between 1 and 100' });
+		}
+
+		const store = new OrderStore(req.app.locals.pool);
+		const addOns = await store.getTopSellingAddOns(limit);
+
+		return res.status(200).json(addOns);
+	} catch (error) {
+		console.error('Get top selling add-ons error:', error);
+		return res
+			.status(500)
+			.json({ error: 'Failed to retrieve top selling add-ons' });
+	}
+};
+
+/**
  * Order route handler - manages all order-related endpoints
+ * Updated to include add-on endpoints
  */
 const orders_route = (app) => {
 	// Admin-only routes
 	app.get('/orders', authenticationToken, requireAdmin, index);
+	app.get('/orders/addons', authenticationToken, requireAdmin, getAddOnOrders);
 	app.get(
 		'/orders/successful',
 		authenticationToken,
@@ -366,6 +475,12 @@ const orders_route = (app) => {
 		authenticationToken,
 		requireAdmin,
 		getTopSellingCourses
+	);
+	app.get(
+		'/orders/top-addons',
+		authenticationToken,
+		requireAdmin,
+		getTopSellingAddOns
 	);
 	app.get('/orders/:id', authenticationToken, requireAdmin, show);
 	app.put(
@@ -391,12 +506,23 @@ const orders_route = (app) => {
 
 	// User routes (authenticated users can create orders and view their own)
 	app.post('/orders', authenticationToken, create);
+	app.post('/orders/addons', authenticationToken, createAddOnOrder);
 	app.get('/users/:userId/orders', authenticateUserId, getUserOrders);
 	app.get('/users/:userId/purchases', authenticateUserId, getUserPurchases);
+	app.get(
+		'/users/:userId/addons/purchased',
+		authenticateUserId,
+		getUserPurchasedAddOns
+	);
 	app.get(
 		'/users/:userId/courses/:courseId/purchased',
 		authenticateUserId,
 		checkUserPurchase
+	);
+	app.get(
+		'/users/:userId/addons/:resourceId/purchased',
+		authenticateUserId,
+		checkUserAddOnPurchase
 	);
 };
 
