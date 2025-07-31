@@ -243,15 +243,36 @@ class ResourceStore {
 	}
 
 	/**
-	 * Delete resource
+	 * Delete resource and related records
 	 */
 	async delete(id) {
 		try {
-			const sql = 'DELETE FROM resources WHERE id = $1 RETURNING *';
 			const client = await this.pool.connect();
-			const res = await client.query(sql, [id]);
-			client.release();
-			return res.rows[0];
+			
+			try {
+				await client.query('BEGIN');
+				
+				// First delete any orders that reference this resource
+				await client.query('DELETE FROM orders WHERE resource_id = $1', [id]);
+				
+				// The resource_courses will be automatically deleted due to CASCADE
+				// Now delete the resource itself
+				const sql = 'DELETE FROM resources WHERE id = $1 RETURNING *';
+				const res = await client.query(sql, [id]);
+				
+				await client.query('COMMIT');
+				
+				if (res.rows.length === 0) {
+					throw new Error('Resource not found');
+				}
+				
+				return res.rows[0];
+			} catch (error) {
+				await client.query('ROLLBACK');
+				throw error;
+			} finally {
+				client.release();
+			}
 		} catch (error) {
 			throw new Error(`Could not delete resource: ${error}`);
 		}
