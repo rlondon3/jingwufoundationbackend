@@ -24,6 +24,7 @@ const terms_route = require('./handlers/termsOfService');
 const blog_route = require('./handlers/blogs');
 const testimonials_route = require('./handlers/testimonials');
 const guided_feedback_route = require('./handlers/guidedFeedback');
+const subscriptions_route = require('./handlers/subscriptions');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -32,6 +33,9 @@ const address = `localhost:${PORT}`;
 // Database connection
 const pool = new Pool({
 	connectionString: process.env.DATABASE_URL,
+	max: 20, // Maximum number of connections in the pool
+	idleTimeoutMillis: 30000, // Close idle connections after 30 seconds
+	connectionTimeoutMillis: 2000, // Return an error after 2 seconds if connection could not be established
 });
 
 // Make pool available to routes
@@ -126,6 +130,7 @@ terms_route(app);
 blog_route(app);
 testimonials_route(app);
 guided_feedback_route(app);
+subscriptions_route(app);
 
 // Error handling for unhandled promise rejections
 process.on('unhandledRejection', (reason, promise) => {

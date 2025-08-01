@@ -19,15 +19,22 @@ class BookingsStore {
 	 * Create new booking
 	 */
 	async createBooking(bookingData) {
+		let client;
 		try {
-			// Check for booking conflicts before creating
-			const conflictingBookings = await this.checkBookingConflicts(
-				bookingData.start_time,
-				bookingData.end_time
-			);
+			// Only check for booking conflicts for scheduled appointments (live_consultation, intensive_mentorship)
+			// Written guidance and video review don't have specific time slots
+			const scheduledTypes = ['live_consultation', 'intensive_mentorship', 'workshop', 'private_class'];
 			
-			if (conflictingBookings.length > 0) {
-				throw new Error('Time slot is already booked. Please choose a different time.');
+			if (scheduledTypes.includes(bookingData.appointment_type)) {
+				const conflictingBookings = await this.checkBookingConflicts(
+					bookingData.start_time,
+					bookingData.end_time,
+					bookingData.appointment_type
+				);
+				
+				if (conflictingBookings.length > 0) {
+					throw new Error('Time slot is already booked. Please choose a different time.');
+				}
 			}
 
 			// Generate booking GUID if not provided (6 characters for user-friendliness)
@@ -49,7 +56,7 @@ class BookingsStore {
         RETURNING *
       `;
 
-			const client = await this.pool.connect();
+			client = await this.pool.connect();
 			const res = await client.query(sql, [
 				bookingGuid,
 				bookingData.appointment_type,
@@ -180,7 +187,7 @@ class BookingsStore {
           u.email as user_email
         FROM bookings b
         LEFT JOIN users u ON b.user_id = u.id
-        WHERE b.start_time >= $1 AND b.end_time <= $2
+        WHERE b.start_time <= $2 AND b.end_time >= $1
         ORDER BY b.start_time
       `;
 
@@ -260,15 +267,20 @@ class BookingsStore {
 					throw new Error('Booking not found');
 				}
 
-				const newStartTime = updateData.start_time || currentBooking.start_time;
-				const newEndTime = updateData.end_time || currentBooking.end_time;
-
-				// Check for conflicts (excluding this booking)
-				const conflictingBookings = await this.checkBookingConflicts(newStartTime, newEndTime);
-				const filteredConflicts = conflictingBookings.filter(booking => booking.id !== id);
+				// Only check conflicts for scheduled appointment types
+				const scheduledTypes = ['live_consultation', 'intensive_mentorship', 'workshop', 'private_class'];
 				
-				if (filteredConflicts.length > 0) {
-					throw new Error('Time slot is already booked. Please choose a different time.');
+				if (scheduledTypes.includes(currentBooking.appointment_type)) {
+					const newStartTime = updateData.start_time || currentBooking.start_time;
+					const newEndTime = updateData.end_time || currentBooking.end_time;
+
+					// Check for conflicts (excluding this booking)
+					const conflictingBookings = await this.checkBookingConflicts(newStartTime, newEndTime, currentBooking.appointment_type);
+					const filteredConflicts = conflictingBookings.filter(booking => booking.id !== id);
+					
+					if (filteredConflicts.length > 0) {
+						throw new Error('Time slot is already booked. Please choose a different time.');
+					}
 				}
 			}
 
@@ -363,24 +375,48 @@ class BookingsStore {
 	/**
 	 * Check for booking conflicts with given time range
 	 */
-	async checkBookingConflicts(startTime, endTime) {
+	async checkBookingConflicts(startTime, endTime, appointmentType = null) {
+		let client;
 		try {
+			// Only check conflicts with other scheduled appointment types
+			// Written guidance and video review are asynchronous and don't conflict with scheduled appointments
+			client = await this.pool.connect();
+			
+			// Get all potentially conflicting bookings (exclude far future/past dates used for async/subscription consultations)
 			const sql = `
 				SELECT * FROM bookings 
 				WHERE status != 'cancelled' 
-				AND (
-					(start_time < $2 AND end_time > $1) OR
-					(start_time >= $1 AND start_time < $2) OR
-					(end_time > $1 AND end_time <= $2)
-				)
+				AND appointment_type IN ('live_consultation', 'workshop', 'private_class')
+				AND start_time >= '1980-01-01'
+				AND start_time < '2099-01-01'
+				AND (start_time::date <= $2::date AND end_time::date >= $1::date)
 			`;
 			
-			const client = await this.pool.connect();
 			const result = await client.query(sql, [startTime, endTime]);
 			client.release();
 			
-			return result.rows;
+			// Filter for actual time-of-day conflicts
+			const newStart = new Date(startTime);
+			const newEnd = new Date(endTime);
+			const newStartTimeOfDay = newStart.getHours() * 60 + newStart.getMinutes();
+			const newEndTimeOfDay = newEnd.getHours() * 60 + newEnd.getMinutes();
+			
+			const conflicts = result.rows.filter(booking => {
+				const existingStart = new Date(booking.start_time);
+				const existingEnd = new Date(booking.end_time);
+				const existingStartTimeOfDay = existingStart.getHours() * 60 + existingStart.getMinutes();
+				const existingEndTimeOfDay = existingEnd.getHours() * 60 + existingEnd.getMinutes();
+				
+				// Check if time-of-day ranges overlap
+				return (newStartTimeOfDay < existingEndTimeOfDay && newEndTimeOfDay > existingStartTimeOfDay);
+			});
+			
+			return conflicts;
 		} catch (error) {
+			// Ensure client is released even if an error occurs
+			if (client) {
+				client.release();
+			}
 			throw new Error(`Could not check booking conflicts: ${error}`);
 		}
 	}

@@ -20,12 +20,204 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
  */
 
 /**
+ * Create Q&A checkout session
+ * POST /stripe/create-qa-checkout-session
+ */
+const createQACheckout = async (req, res) => {
+	try {
+		const { 
+			appointment_type, 
+			full_name, 
+			email, 
+			phone_number, 
+			start_time, 
+			end_time, 
+			notes, 
+			user_id, 
+			price, 
+			session_name, 
+			is_subscription,
+			course_id
+		} = req.body;
+
+		if (!appointment_type || !full_name || !email || !price || !session_name) {
+			return res.status(400).json({ error: 'Missing required parameters' });
+		}
+
+		// Initialize stores
+		const customerStore = new StripeCustomerStore(req.app.locals.pool);
+
+		// Find or create Stripe customer
+		let stripeCustomer = await customerStore.findByUserId(user_id);
+		let customerId;
+
+		if (!stripeCustomer) {
+			// Create new Stripe customer
+			const customer = await stripe.customers.create({
+				email: email,
+				name: full_name,
+				metadata: { userId: user_id?.toString() || 'guest' },
+			});
+
+			// Save to database if user_id exists
+			if (user_id) {
+				stripeCustomer = await customerStore.create({
+					userId: user_id,
+					customerId: customer.id,
+				});
+			}
+
+			customerId = customer.id;
+		} else {
+			customerId = stripeCustomer.customer_id;
+		}
+
+		// Create line items based on appointment type
+		let lineItems;
+		const mode = is_subscription ? 'subscription' : 'payment';
+		
+		if (is_subscription) {
+			// For intensive mentorship subscription
+			lineItems = [
+				{
+					price_data: {
+						currency: 'usd',
+						product_data: {
+							name: session_name,
+							description: 'Monthly subscription • Weekly 20-min calls • 3 questions/week • Advanced training',
+							metadata: {
+								appointment_type: appointment_type,
+								is_qa_booking: 'true',
+							},
+						},
+						unit_amount: Math.round(price * 100), // Convert to cents
+						recurring: {
+							interval: 'month',
+						},
+					},
+					quantity: 1,
+				},
+			];
+		} else {
+			// For one-time Q&A sessions
+			let description;
+			switch (appointment_type) {
+				case 'written_guidance':
+					description = 'Submit up to 5 written questions • 72-hour written response';
+					break;
+				case 'video_review':
+					description = 'Submit practice video + 3 questions • Video response within 72hrs';
+					break;
+				case 'live_consultation':
+					description = '20-minute scheduled Zoom call';
+					break;
+				default:
+					description = `${session_name} session`;
+			}
+
+			lineItems = [
+				{
+					price_data: {
+						currency: 'usd',
+						product_data: {
+							name: session_name,
+							description: description,
+							metadata: {
+								appointment_type: appointment_type,
+								is_qa_booking: 'true',
+							},
+						},
+						unit_amount: Math.round(price * 100), // Convert to cents
+					},
+					quantity: 1,
+				},
+			];
+		}
+
+		// Create appropriate success/cancel URLs based on appointment type
+		let success_url, cancel_url;
+		const courseParam = course_id ? `&course_id=${course_id}` : '';
+		
+		if (is_subscription && appointment_type === 'intensive_mentorship') {
+			// Intensive mentorship subscription
+			success_url = `${process.env.FRONTEND_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}&intensive_mentorship_subscription=true${courseParam}`;
+			cancel_url = `${process.env.FRONTEND_URL}/payment/failed?intensive_mentorship_subscription=true&reason=cancelled${courseParam}`;
+		} else {
+			// Regular Q&A consultations
+			success_url = `${process.env.FRONTEND_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}&qa_consultation=${appointment_type}${courseParam}`;
+			cancel_url = `${process.env.FRONTEND_URL}/payment/failed?qa_consultation=${appointment_type}&reason=cancelled${courseParam}`;
+		}
+
+		// Create checkout session
+		const session = await stripe.checkout.sessions.create({
+			customer: customerId,
+			payment_method_types: ['card'],
+			line_items: lineItems,
+			mode: mode,
+			success_url: success_url,
+			cancel_url: cancel_url,
+			metadata: {
+				appointment_type: appointment_type,
+				full_name: full_name,
+				email: email,
+				phone_number: phone_number || '',
+				start_time: start_time,
+				end_time: end_time,
+				notes: notes || '',
+				user_id: user_id?.toString() || '',
+				course_id: course_id?.toString() || '',
+				is_qa_booking: 'true',
+				is_subscription: is_subscription ? 'true' : 'false',
+			},
+		});
+
+		// Create consultation order for all Q&A sessions (including subscriptions)
+		let order = null;
+		if (user_id) {
+			const { OrderStore } = require('../models/order');
+			const orderStore = new OrderStore(req.app.locals.pool);
+			
+			try {
+				order = await orderStore.createConsultationOrder({
+					user_id: user_id,
+					course_id: course_id,
+					add_on_price: price,
+					item_name: session_name,
+					order_status: 'pending',
+					payment_method: 'stripe',
+					stripe_checkout_session_id: session.id,
+					notes: `Q&A Consultation: ${appointment_type}`,
+				});
+			} catch (orderError) {
+				console.error('Failed to create consultation order:', orderError);
+				// Continue with checkout session creation even if order creation fails
+			}
+		}
+
+		res.json({ 
+			sessionId: session.id, 
+			url: session.url,
+			orderId: order?.id || null
+		});
+	} catch (error) {
+		console.error('Q&A Checkout error:', error);
+		res.status(500).json({ error: 'Failed to create checkout session' });
+	}
+};
+
+/**
  * Create checkout session
  * POST /stripe/create-checkout
  */
 const createCheckout = async (req, res) => {
 	try {
-		const { price_id, success_url, cancel_url, mode, course_id, course_price, resource_id, resource_price, ai_sifu_subscription, ai_sifu_price } = req.body;
+		const { 
+			price_id, success_url, cancel_url, mode, 
+			course_id, course_price, 
+			resource_id, resource_price, 
+			ai_sifu_subscription, ai_sifu_price,
+			qa_consultation, qa_consultation_type, qa_consultation_price, qa_session_name, qa_booking_data
+		} = req.body;
 		const userId = req.user.id;
 
 		if (!userId) {
@@ -40,14 +232,19 @@ const createCheckout = async (req, res) => {
 			return res.status(400).json({ error: 'Invalid mode' });
 		}
 
-		// For purchases, we need either a price_id, course_id + course_price, resource_id + resource_price, or ai_sifu_subscription + ai_sifu_price
-		if (mode === 'payment' && !price_id && (!course_id || !course_price) && (!resource_id || !resource_price) && !ai_sifu_subscription) {
-			return res.status(400).json({ error: 'For purchases, provide either price_id, course_id + course_price, resource_id + resource_price, or ai_sifu_subscription + ai_sifu_price' });
+		// For purchases, we need either a price_id, course_id + course_price, resource_id + resource_price, ai_sifu_subscription + ai_sifu_price, or qa_consultation + qa_consultation_price
+		if (mode === 'payment' && !price_id && (!course_id || !course_price) && (!resource_id || !resource_price) && !ai_sifu_subscription && (!qa_consultation || !qa_consultation_price)) {
+			return res.status(400).json({ error: 'For purchases, provide either price_id, course_id + course_price, resource_id + resource_price, ai_sifu_subscription + ai_sifu_price, or qa_consultation + qa_consultation_price' });
 		}
 		
 		// For AI Sifu subscriptions, we need ai_sifu_price
 		if (mode === 'subscription' && ai_sifu_subscription && !ai_sifu_price) {
 			return res.status(400).json({ error: 'For AI Sifu subscriptions, ai_sifu_price is required' });
+		}
+		
+		// For Q&A consultations, we need qa_consultation_price and qa_session_name
+		if (qa_consultation && (!qa_consultation_price || !qa_session_name)) {
+			return res.status(400).json({ error: 'For Q&A consultations, qa_consultation_price and qa_session_name are required' });
 		}
 
 		// Initialize stores
@@ -174,6 +371,52 @@ const createCheckout = async (req, res) => {
 					quantity: 1,
 				},
 			];
+		} else if (qa_consultation && qa_consultation_price) {
+			// Create dynamic price for Q&A consultation
+			let description;
+			switch (qa_consultation_type) {
+				case 'written_guidance':
+					description = 'Submit up to 5 written questions • 72-hour written response';
+					break;
+				case 'video_review':
+					description = 'Submit practice video + 3 questions • Video response within 72hrs';
+					break;
+				case 'live_consultation':
+					description = '20-minute scheduled Zoom call';
+					break;
+				case 'intensive_mentorship':
+					description = 'Monthly subscription • Weekly 20-min calls • 3 questions/week • Advanced training';
+					break;
+				default:
+					description = `${qa_session_name} consultation`;
+			}
+
+			const priceData = {
+				currency: 'usd',
+				product_data: {
+					name: qa_session_name,
+					description: description,
+					metadata: {
+						is_qa_consultation: 'true',
+						qa_consultation_type: qa_consultation_type,
+					},
+				},
+				unit_amount: Math.round(qa_consultation_price * 100), // Convert to cents
+			};
+
+			// Add recurring for intensive mentorship subscription
+			if (qa_consultation_type === 'intensive_mentorship') {
+				priceData.recurring = {
+					interval: 'month',
+				};
+			}
+
+			lineItems = [
+				{
+					price_data: priceData,
+					quantity: 1,
+				},
+			];
 		}
 
 		// Create checkout session
@@ -189,16 +432,31 @@ const createCheckout = async (req, res) => {
 				resource_id: resource_id?.toString() || '',
 				user_id: userId.toString(),
 				is_ai_sifu_subscription: ai_sifu_subscription ? 'true' : 'false',
+				is_qa_consultation: qa_consultation ? 'true' : 'false',
+				qa_consultation_type: qa_consultation_type || '',
+				qa_booking_data: qa_booking_data ? JSON.stringify(qa_booking_data) : '',
 			},
 		});
 
 		let order = null;
 		
-		// Only create orders for course/resource purchases, not AI Sifu subscriptions
+		// Only create orders for course/resource/consultation purchases, not AI Sifu subscriptions
 		if (!ai_sifu_subscription) {
 			const orderStore = new OrderStore(req.app.locals.pool);
 
-			if (resource_id) {
+			if (qa_consultation) {
+				// Create consultation order (Q&A add-on)
+				order = await orderStore.createConsultationOrder({
+					user_id: userId,
+					course_id: course_id,
+					add_on_price: qa_consultation_price,
+					item_name: qa_session_name,
+					order_status: 'pending',
+					payment_method: 'stripe',
+					stripe_checkout_session_id: session.id,
+					notes: `Q&A Consultation: ${qa_consultation_type}`,
+				});
+			} else if (resource_id) {
 				// Create add-on order for resource (linked to course)
 				order = await orderStore.createAddOnOrder({
 					user_id: userId,
@@ -237,29 +495,23 @@ const createCheckout = async (req, res) => {
  */
 const webhook = async (req, res) => {
 	try {
-		console.log('🔔 Webhook received:', req.headers['stripe-signature'] ? 'with signature' : 'without signature');
-		
 		const sig = req.headers['stripe-signature'];
 		const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
 		let event;
 		try {
 			event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
-			console.log('✅ Webhook verified, event type:', event.type);
 		} catch (err) {
-			console.error('❌ Webhook signature verification failed:', err.message);
+			console.error('Webhook signature verification failed:', err.message);
 			return res.status(400).send(`Webhook Error: ${err.message}`);
 		}
-
-		console.log('📧 Processing webhook event:', event.type, 'ID:', event.id);
 		
 		// Handle the event
 		await handleStripeEvent(event, req.app.locals.pool);
 
-		console.log('✅ Webhook processed successfully');
 		res.json({ received: true });
 	} catch (error) {
-		console.error('❌ Webhook error:', error);
+		console.error('Webhook processing failed');
 		res.status(500).json({ error: 'Webhook processing failed' });
 	}
 };
@@ -395,15 +647,17 @@ async function handleStripeEvent(event, pool) {
 	if (event.type === 'checkout.session.completed') {
 		const { mode, payment_status } = stripeData;
 		isSubscription = mode === 'subscription';
+		
 
-		if (mode === 'payment' && payment_status === 'paid') {
-			// Handle one-time payment (course purchases)
+		if ((mode === 'payment' || mode === 'subscription') && payment_status === 'paid') {
+			// Handle one-time payment (course purchases or Q&A bookings)
 			const {
 				id: checkout_session_id,
 				payment_intent,
 				amount_subtotal,
 				amount_total,
 				currency,
+				metadata
 			} = stripeData;
 
 			// Save to Stripe orders table
@@ -419,22 +673,37 @@ async function handleStripeEvent(event, pool) {
 				status: 'completed',
 			});
 
-			// Complete the main order (course enrollment)
-			const { OrderStore } = require('../models/order');
-			const orderStore = new OrderStore(pool);
+			// Check if this is a Q&A consultation
+			if (metadata?.is_qa_booking === 'true') {
+				// Complete the consultation order first
+				const { OrderStore } = require('../models/order');
+				const orderStore = new OrderStore(pool);
 
-			try {
-				const completedOrder = await orderStore.completeFromStripe(
-					checkout_session_id,
-					payment_intent
-				);
+				try {
+					await orderStore.completeFromStripe(
+						checkout_session_id,
+						payment_intent
+					);
+				} catch (error) {
+					console.error('Failed to complete consultation order');
+				}
 
-			} catch (error) {
-				console.error(
-					`Failed to complete main order for session ${checkout_session_id}:`,
-					error
-				);
-				// Stripe payment succeeded but order completion failed - needs manual review
+				// Note: Booking is already created by frontend before payment
+				// Webhook only handles payment/order completion
+			} else {
+				// Complete the main order (course/resource enrollment)
+				const { OrderStore } = require('../models/order');
+				const orderStore = new OrderStore(pool);
+
+				try {
+					await orderStore.completeFromStripe(
+						checkout_session_id,
+						payment_intent
+					);
+				} catch (error) {
+					console.error('Failed to complete main order');
+					// Stripe payment succeeded but order completion failed - needs manual review
+				}
 			}
 		}
 	}
@@ -461,12 +730,10 @@ async function handleStripeEvent(event, pool) {
 						[customerId]
 					);
 					if (customerQuery.rows.length === 0) {
-						console.log('❌ No user found for customer:', customerId);
-						return;
+							return;
 					}
 					userId = customerQuery.rows[0].user_id;
-					console.log('👤 Found user', userId, 'for subscription event:', event.type);
-				}
+					}
 				
 				// Get the subscription details from Stripe
 				const subscription = await stripe.subscriptions.retrieve(subscriptionId);
@@ -482,13 +749,28 @@ async function handleStripeEvent(event, pool) {
 						description: 'AI Sifu Monthly Subscription',
 						features: ['12 questions per month', 'Personal AI martial arts guide']
 					};
+				} else if (event.type === 'checkout.session.completed' && stripeData.metadata?.is_qa_booking === 'true' && stripeData.metadata?.appointment_type === 'intensive_mentorship') {
+					subscriptionType = 'intensive_mentorship';
+					metadata = {
+						description: 'Intensive Mentorship Monthly Subscription',
+						features: ['Weekly 20-min calls', '3 questions per week', 'Advanced training', 'Dedicated instructor relationship'],
+						appointment_type: stripeData.metadata.appointment_type,
+						full_name: stripeData.metadata.full_name,
+						email: stripeData.metadata.email,
+						phone_number: stripeData.metadata.phone_number,
+						start_time: stripeData.metadata.start_time,
+						end_time: stripeData.metadata.end_time,
+						notes: stripeData.metadata.notes
+					};
+					
 				} else if (event.type === 'checkout.session.completed' && stripeData.metadata?.course_id) {
 					subscriptionType = 'course';
 					resourceId = parseInt(stripeData.metadata.course_id);
 				} else if (event.type.startsWith('customer.subscription.')) {
-					// For subscription events, determine type from product name
+					// For subscription events, determine type from product name or metadata
 					const productName = subscription.items.data[0]?.price?.product?.name || 
 					                   subscription.items.data[0]?.price?.nickname || '';
+					const productMetadata = subscription.items.data[0]?.price?.product?.metadata || {};
 					
 					if (productName.includes('AI Sifu') || productName.includes('ai_sifu')) {
 						subscriptionType = 'ai_sifu';
@@ -496,8 +778,13 @@ async function handleStripeEvent(event, pool) {
 							description: 'AI Sifu Monthly Subscription',
 							features: ['12 questions per month', 'Personal AI martial arts guide']
 						};
+					} else if (productName.includes('Intensive Mentorship') || productMetadata.appointment_type === 'intensive_mentorship') {
+						subscriptionType = 'intensive_mentorship';
+						metadata = {
+							description: 'Intensive Mentorship Monthly Subscription',
+							features: ['Weekly 20-min calls', '3 questions per week', 'Advanced training', 'Dedicated instructor relationship']
+						};
 					}
-					console.log('🔍 Detected subscription type:', subscriptionType, 'from product:', productName);
 				}
 				
 				// Create subscription record in general subscriptions table
@@ -520,23 +807,54 @@ async function handleStripeEvent(event, pool) {
 				// Calculate price in cents from subscription
 				const priceCents = subscription.items.data[0]?.price?.unit_amount || 0;
 				
+				// Skip creating 'general' subscriptions from customer.subscription.created events
+				// These are handled better by checkout.session.completed events with proper metadata
+				if (subscriptionType === 'general' && event.type === 'customer.subscription.created') {
+						return;
+				}
+				
+				// Validate and convert timestamps
+				const startDate = subscription.current_period_start ? new Date(subscription.current_period_start * 1000) : new Date();
+				const endDate = subscription.current_period_end ? new Date(subscription.current_period_end * 1000) : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // Default to 30 days from now
+				
 				await pool.query(subscriptionSql, [
 					userId,
 					subscription.id,
 					subscriptionType,
 					resourceId,
 					subscription.status,
-					new Date(subscription.current_period_start * 1000),
-					new Date(subscription.current_period_end * 1000),
+					startDate,
+					endDate,
 					subscription.cancel_at_period_end,
 					priceCents,
 					JSON.stringify(metadata)
 				]);
 				
-				console.log(`${subscriptionType} subscription activated for user ${userId}: ${subscription.id}`);
 			} catch (error) {
 				console.error('Error activating subscription:', error);
 			}
+		}
+	}
+
+	// Handle subscription deletion/cancellation events
+	if (event.type === 'customer.subscription.deleted' || 
+		(event.type === 'customer.subscription.updated' && stripeData.status === 'canceled')) {
+		try {
+			const subscriptionId = stripeData.id;
+
+			// Update subscription status in both tables
+			await pool.query(
+				'UPDATE subscriptions SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE stripe_subscription_id = $2',
+				['cancelled', subscriptionId]
+			);
+
+			await pool.query(
+				'UPDATE stripe_subscriptions SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE subscription_id = $2',
+				['canceled', subscriptionId]
+			);
+
+		} catch (error) {
+			console.error('Error updating cancelled subscription:', error);
 		}
 	}
 }
@@ -571,9 +889,12 @@ async function syncCustomerFromStripe(customerId, pool) {
 			return;
 		}
 
-		const subscription = subscriptions.data[0];
-
-		// Store subscription state
+		let subscription = subscriptions.data[0];
+		
+		// Fetch full subscription details to ensure we have period dates
+		subscription = await stripe.subscriptions.retrieve(subscription.id, {
+			expand: ['default_payment_method']
+		});
 		await subscriptionStore.upsert({
 			customerId,
 			subscriptionId: subscription.id,
@@ -589,10 +910,7 @@ async function syncCustomerFromStripe(customerId, pool) {
 		});
 
 	} catch (error) {
-		console.error(
-			`Failed to sync subscription for customer ${customerId}:`,
-			error
-		);
+		console.error('Failed to sync subscription for customer');
 		throw error;
 	}
 }
@@ -606,6 +924,7 @@ const stripe_route = (app) => {
 
 	// Protected routes
 	app.post('/stripe/create-checkout', authenticationToken, createCheckout);
+	app.post('/stripe/create-qa-checkout-session', createQACheckout); // Q&A checkout can be used by guests
 	app.post('/stripe/verify-payment', authenticationToken, verifyPayment);
 	app.get('/stripe/subscription/:userId', authenticateUserId, getSubscription);
 	app.get('/stripe/orders/:userId', authenticateUserId, getOrders);

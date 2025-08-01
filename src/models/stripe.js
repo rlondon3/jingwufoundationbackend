@@ -66,6 +66,7 @@ class StripeSubscriptionStore {
 	}
 
 	async upsert(subscriptionData) {
+		let client;
 		try {
 			const {
 				customerId,
@@ -100,7 +101,7 @@ class StripeSubscriptionStore {
         RETURNING *
       `;
 
-			const client = await this.pool.connect();
+			client = await this.pool.connect();
 			const result = await client.query(query, [
 				customerId,
 				subscriptionId,
@@ -112,9 +113,13 @@ class StripeSubscriptionStore {
 				paymentMethodLast4,
 				status,
 			]);
+			
 			client.release();
 			return result.rows[0];
 		} catch (error) {
+			if (client) {
+				client.release();
+			}
 			throw new Error(`Could not upsert stripe subscription: ${error}`);
 		}
 	}

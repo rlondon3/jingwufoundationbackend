@@ -236,6 +236,43 @@ class OrderStore {
 	}
 
 	/**
+	 * Create new Q&A consultation order (add-on linked to course)
+	 */
+	async createConsultationOrder(order) {
+		try {
+			const client = await this.pool.connect();
+
+			// Q&A consultations are linked to the course the user is viewing
+			// They are service-based add-ons, not resource-based
+			const sql = `
+        INSERT INTO orders (user_id, course_id, resource_id, course_price, add_on_price,
+                           order_status, payment_method, stripe_checkout_session_id, notes,
+                           is_add_on, item_name)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *
+      `;
+
+			const res = await client.query(sql, [
+				order.user_id,
+				order.course_id, // course_id from the course page context
+				null, // resource_id = null for consultations  
+				0,    // course_price = 0 for add-on orders
+				order.add_on_price,
+				order.order_status || 'pending',
+				order.payment_method || 'stripe',
+				order.stripe_checkout_session_id || null,
+				order.notes || null,
+				true, // is_add_on = true for consultation orders
+				order.item_name, // consultation type name
+			]);
+
+			client.release();
+			return res.rows[0];
+		} catch (error) {
+			throw new Error(`Could not create consultation order: ${error}`);
+		}
+	}
+
+	/**
 	 * Update order status (works for both course and add-on orders)
 	 */
 	async updateStatus(
