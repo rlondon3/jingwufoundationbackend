@@ -324,6 +324,11 @@ class ManualContentProcessor {
 		const excerpts = new Set();
 		let relationship = [];
 
+		// Helper function to escape regex special characters
+		const escapeRegex = (string) => {
+			return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		};
+
 		// Conceptual keyword mapping for martial arts
 		const conceptMap = {
 			// Internal energy concepts
@@ -352,7 +357,8 @@ class ManualContentProcessor {
 		queryWords.forEach(word => {
 			if (conceptMap[word]) {
 				conceptMap[word].forEach(concept => {
-					const regex = new RegExp(`[^.!?]*\\b${concept}\\b[^.!?]*[.!?]`, 'gi');
+					const escapedConcept = escapeRegex(concept);
+					const regex = new RegExp(`[^.!?]*\\b${escapedConcept}\\b[^.!?]*[.!?]`, 'gi');
 					const matches = content.match(regex) || [];
 					if (matches.length > 0) {
 						score += matches.length * 0.5; // Lower weight than direct matches
@@ -367,7 +373,8 @@ class ManualContentProcessor {
 		terms.forEach(term => {
 			if (term.info && term.info.relatedTerms) {
 				term.info.relatedTerms.forEach(relatedTerm => {
-					const regex = new RegExp(`[^.!?]*\\b${relatedTerm}\\b[^.!?]*[.!?]`, 'gi');
+					const escapedRelatedTerm = escapeRegex(relatedTerm);
+					const regex = new RegExp(`[^.!?]*\\b${escapedRelatedTerm}\\b[^.!?]*[.!?]`, 'gi');
 					const matches = content.match(regex) || [];
 					if (matches.length > 0) {
 						score += matches.length * 0.7;
@@ -389,10 +396,16 @@ class ManualContentProcessor {
 		let score = 0;
 		const excerpts = new Set();
 
+		// Helper function to escape regex special characters
+		const escapeRegex = (string) => {
+			return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		};
+
 		// Check for term matches first (higher priority)
 		terms.forEach((term) => {
+			const escapedTerm = escapeRegex(term.standard);
 			const regex = new RegExp(
-				`[^.!?]*\\b${term.standard}\\b[^.!?]*[.!?]`,
+				`[^.!?]*\\b${escapedTerm}\\b[^.!?]*[.!?]`,
 				'gi'
 			);
 			const matches = content.match(regex) || [];
@@ -403,7 +416,8 @@ class ManualContentProcessor {
 		// Check for query word matches
 		const words = query.toLowerCase().split(/\s+/);
 		words.forEach((word) => {
-			const regex = new RegExp(`[^.!?]*\\b${word}\\b[^.!?]*[.!?]`, 'gi');
+			const escapedWord = escapeRegex(word);
+			const regex = new RegExp(`[^.!?]*\\b${escapedWord}\\b[^.!?]*[.!?]`, 'gi');
 			const matches = content.match(regex) || [];
 			score += matches.length;
 			matches.slice(0, 1).forEach((match) => excerpts.add(match.trim()));
