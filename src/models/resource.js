@@ -519,7 +519,25 @@ class ResourceStore {
 	}
 
 	async getByCourse(courseId) {
-		// ... existing implementation
+		try {
+			const sql = `
+        SELECT 
+          r.*,
+          array_agg(rc.course_id) FILTER (WHERE rc.course_id IS NOT NULL) as related_courses
+        FROM resources r
+        INNER JOIN resource_courses rc ON r.id = rc.resource_id
+        WHERE rc.course_id = $1 AND r.is_published = true AND r.is_public = true AND r.type != 'pdf'
+        GROUP BY r.id
+        ORDER BY r.created_at DESC
+      `;
+
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [courseId]);
+			client.release();
+			return res.rows;
+		} catch (error) {
+			throw new Error(`Can't retrieve resources by course: ${error}`);
+		}
 	}
 
 	async adminIndex() {
@@ -590,7 +608,7 @@ class ResourceStore {
 function validateResource(resource) {
 	const resourceSchema = Joi.object({
 		title: Joi.string().min(1).max(200).required(),
-		type: Joi.string().valid('blog', 'video', 'audio', 'manual').required(),
+		type: Joi.string().valid('blog', 'video', 'audio', 'manual', 'pdf').required(),
 		content: Joi.string().allow('', null),
 		video_url: Joi.string().uri().allow('', null),
 		audio_url: Joi.string().uri().allow('', null),
@@ -605,6 +623,15 @@ function validateResource(resource) {
 		related_courses: Joi.array()
 			.items(Joi.number().integer().positive())
 			.default([]),
+		
+		// PDF and AI-specific fields
+		file_path: Joi.string().allow('', null),
+		ai_category: Joi.string().valid('martial-arts', 'philosophy', 'meditation', 'forms', 'history', 'theory', 'practice').allow('', null),
+		term_normalizers: Joi.string().allow('', null),
+		content_tags: Joi.array().items(Joi.string()).default([]),
+		ai_summary: Joi.string().max(2000).allow('', null),
+		difficulty_level: Joi.string().valid('beginner', 'intermediate', 'advanced').allow('', null),
+		is_public: Joi.boolean().default(true),
 	}).custom((value, helpers) => {
 		// If is_add_on is true, price should be provided
 		if (value.is_add_on && !value.price) {
