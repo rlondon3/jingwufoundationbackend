@@ -98,7 +98,7 @@ const getByType = async (req, res) => {
 	try {
 		const type = req.params.type;
 
-		if (!['blog', 'video', 'audio'].includes(type)) {
+		if (!['blog', 'video', 'audio', 'manual'].includes(type)) {
 			return res.status(400).json({ error: 'Invalid resource type' });
 		}
 
