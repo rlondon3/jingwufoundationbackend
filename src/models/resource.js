@@ -44,7 +44,7 @@ class ResourceStore {
 			sql += `
         FROM resources r
         LEFT JOIN resource_courses rc ON r.id = rc.resource_id
-        WHERE r.is_published = true
+        WHERE r.is_published = true AND r.is_public = true
         GROUP BY r.id
         ORDER BY r.created_at DESC
       `;
@@ -90,7 +90,7 @@ class ResourceStore {
 			sql += `
         FROM resources r
         LEFT JOIN resource_courses rc ON r.id = rc.resource_id
-        WHERE r.id = $1
+        WHERE r.id = $1 AND r.is_public = true
         GROUP BY r.id
       `;
 
@@ -308,7 +308,7 @@ class ResourceStore {
 			sql += `
         FROM resources r
         LEFT JOIN resource_courses rc ON r.id = rc.resource_id
-        WHERE r.is_published = true AND r.is_add_on = true
+        WHERE r.is_published = true AND r.is_add_on = true AND r.is_public = true
         GROUP BY r.id
         ORDER BY r.created_at DESC
       `;
@@ -363,6 +363,7 @@ class ResourceStore {
         AND o.order_status = 'completed'
         AND o.is_add_on = TRUE
         AND r.is_published = true
+        AND r.is_public = true
         ORDER BY o.completed_at DESC
       `;
 			const client = await this.pool.connect();
@@ -389,7 +390,7 @@ class ResourceStore {
           END as access_type
         FROM resources r
         LEFT JOIN resource_courses rc ON r.id = rc.resource_id
-        WHERE r.is_published = true
+        WHERE r.is_published = true AND r.is_public = true
         AND (
           r.is_add_on = FALSE 
           OR EXISTS(
@@ -446,7 +447,7 @@ class ResourceStore {
 			sql += `
         FROM resources r
         LEFT JOIN resource_courses rc ON r.id = rc.resource_id
-        WHERE r.type = $1 AND r.is_published = true
+        WHERE r.type = $1 AND r.is_published = true AND r.is_public = true
         GROUP BY r.id
         ORDER BY r.created_at DESC
       `;
@@ -492,7 +493,7 @@ class ResourceStore {
 			sql += `
         FROM resources r
         LEFT JOIN resource_courses rc ON r.id = rc.resource_id
-        WHERE r.is_published = true
+        WHERE r.is_published = true AND r.is_public = true
         AND (r.title ILIKE $1 OR r.description ILIKE $1 OR r.content ILIKE $1)
         GROUP BY r.id
         ORDER BY r.created_at DESC

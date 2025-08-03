@@ -9,6 +9,7 @@ const courses_route = require('./handlers/courses');
 const stripeRoute = require('./handlers/stripe');
 const ordersRoute = require('./handlers/orders');
 const messagesRoute = require('./handlers/messages');
+const messageEventsRoute = require('./handlers/messageEvents');
 const news_route = require('./handlers/news');
 const resources_route = require('./handlers/resources');
 const ai_sifu_route = require('./handlers/aiSifu');
@@ -25,6 +26,8 @@ const blog_route = require('./handlers/blogs');
 const testimonials_route = require('./handlers/testimonials');
 const guided_feedback_route = require('./handlers/guidedFeedback');
 const subscriptions_route = require('./handlers/subscriptions');
+const { checkAndProcessContent } = require('../scripts/processContentChunks');
+const { checkAndImportPDFs } = require('../scripts/addPDFResources');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -35,7 +38,7 @@ const pool = new Pool({
 	connectionString: process.env.DATABASE_URL,
 	max: 20, // Maximum number of connections in the pool
 	idleTimeoutMillis: 30000, // Close idle connections after 30 seconds
-	connectionTimeoutMillis: 2000, // Return an error after 2 seconds if connection could not be established
+	connectionTimeoutMillis: 5000, // Return an error after 5 seconds if connection could not be established
 });
 
 // Make pool available to routes
@@ -116,6 +119,7 @@ courses_route(app);
 stripeRoute(app);
 ordersRoute(app);
 messagesRoute(app);
+messageEventsRoute(app);
 news_route(app);
 resources_route(app);
 reviews_route(app);
@@ -142,18 +146,52 @@ process.on('uncaughtException', (error) => {
 });
 
 // Graceful shutdown
-process.on('SIGINT', async () => {
-	console.log('\n🔄 Shutting down gracefully...');
-	await pool.end();
-	console.log('✅ Database connections closed');
-	process.exit(0);
-});
+let isShuttingDown = false;
+
+const gracefulShutdown = async (signal) => {
+	if (isShuttingDown) {
+		console.log('🔄 Shutdown already in progress...');
+		return;
+	}
+	
+	isShuttingDown = true;
+	console.log(`\n🔄 Shutting down gracefully... (${signal})`);
+	
+	try {
+		// Close database connections
+		console.log('🔄 Closing database connections...');
+		if (!pool.ended) {
+			await pool.end();
+			console.log('✅ Database connections closed');
+		}
+		
+		console.log('✅ Graceful shutdown complete');
+		process.exit(0);
+		
+	} catch (error) {
+		console.error('❌ Error during shutdown:', error.message);
+		process.exit(1);
+	}
+};
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 // Start server
-app.listen(PORT, async function () {
+const server = app.listen(PORT, async function () {
 	console.log(`🚀 Starting app using the server on ${address}`);
 	console.log(`📋 Environment: ${process.env.NODE_ENV || 'development'}`);
 	await testConnection();
+	
+	// Auto-import PDF files and process content chunks on startup
+	console.log('🔄 Starting PDF import and content processing...');
+	
+	// Step 1: Import any new PDF files from assets/resources
+	await checkAndImportPDFs();
+	
+	// Step 2: Process content chunks (includes new PDFs)
+	await checkAndProcessContent();
+	console.log('✅ PDF import and content processing completed');
 });
 
 module.exports = app;

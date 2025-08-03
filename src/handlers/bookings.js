@@ -361,6 +361,49 @@ const updateBookingStatus = async (req, res) => {
 };
 
 /**
+ * Delete completed written guidance booking (user)
+ * DELETE /bookings/:id/completed
+ */
+const deleteCompletedBooking = async (req, res) => {
+	try {
+		const bookingId = parseInt(req.params.id);
+		const userId = req.user.id;
+		
+		const store = new BookingsStore(req.app.locals.pool);
+		
+		// First check if the booking exists, belongs to the user, and is completed written guidance
+		const booking = await store.getBookingById(bookingId);
+		
+		if (!booking) {
+			return res.status(404).json({ error: 'Booking not found' });
+		}
+		
+		if (booking.user_id !== userId) {
+			return res.status(403).json({ error: 'Access denied - not your booking' });
+		}
+		
+		if (booking.appointment_type !== 'written_guidance') {
+			return res.status(400).json({ error: 'Only written guidance bookings can be deleted' });
+		}
+		
+		if (booking.status !== 'completed') {
+			return res.status(400).json({ error: 'Only completed bookings can be deleted' });
+		}
+		
+		// Delete the booking
+		const deletedBooking = await store.deleteBooking(bookingId);
+		
+		return res.status(200).json({
+			message: 'Completed written guidance booking deleted successfully',
+			booking: deletedBooking,
+		});
+	} catch (error) {
+		console.error('Delete completed booking error:', error);
+		return res.status(500).json({ error: 'Failed to delete completed booking' });
+	}
+};
+
+/**
  * Delete booking (admin)
  * DELETE /admin/bookings/:id
  */
@@ -472,6 +515,7 @@ const bookings_route = (app) => {
 
 	// User routes (authentication required)
 	app.get('/users/:userId/bookings', authenticateUserId, getUserBookings);
+	app.delete('/bookings/:id/completed', authenticationToken, deleteCompletedBooking);
 
 	// Booking management routes (optional authentication - public or user-owned)
 	app.put(

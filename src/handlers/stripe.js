@@ -12,8 +12,192 @@ const {
 } = require('../middleware/auth');
 
 const { OrderStore } = require('../models/order');
+const { MessageStore } = require('../models/message');
+const OptimizedNeigongAgent = require('../utilis/optimizedAgent');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
+/**
+ * Handle AI Sifu response for written guidance (async background processing)
+ */
+async function handleWrittenGuidanceResponse(userId, questions, courseId, checkoutSessionId = null) {
+	// Create fresh database pool for this background task
+	const { Pool } = require('pg');
+	const pool = new Pool({
+		connectionString: process.env.DATABASE_URL,
+		max: 5, // Smaller pool for background tasks
+		idleTimeoutMillis: 30000,
+		connectionTimeoutMillis: 5000,
+	});
+	let client = null;
+	try {
+		console.log(`Processing written guidance response for user ${userId}, session: ${checkoutSessionId}`);
+		
+		// Use dedicated client for this long-running operation
+		client = await pool.connect();
+		
+		// Check if we've already processed this session to prevent duplicates
+		if (checkoutSessionId) {
+			const duplicateCheck = await client.query(`
+				SELECT m.id FROM messages m
+				JOIN conversations c ON m.conversation_id = c.id
+				WHERE m.sender_id = (SELECT id FROM users WHERE is_admin = true LIMIT 1)
+				AND (c.user1_id = $1 OR c.user2_id = $1)
+				AND m.text LIKE '%Thank you for your written guidance questions%'
+				AND m.sent_at > NOW() - INTERVAL '1 hour'
+				AND m.text LIKE '%' || $2 || '%'
+				LIMIT 1
+			`, [userId, checkoutSessionId.slice(-8)]); // Use last 8 chars of session ID as marker
+			
+			if (duplicateCheck.rows.length > 0) {
+				console.log(`Duplicate AI response prevented for session ${checkoutSessionId}, user ${userId}`);
+				return;
+			}
+		}
+		
+		// Get admin user ID
+		const adminQuery = await client.query('SELECT id FROM users WHERE is_admin = true LIMIT 1');
+		if (adminQuery.rows.length === 0) {
+			console.error('No admin user found for AI Sifu responses');
+			return;
+		}
+		const adminId = adminQuery.rows[0].id;
+		
+		// Release connection before AI call (which takes time)
+		client.release();
+		client = null;
+
+		console.log(`Generating AI response for user ${userId}...`);
+		
+		// Create separate database pool ONLY for AI operations (completely isolated from main app)
+		const { Pool: AIPool } = require('pg');
+		const aiPool = new AIPool({
+			connectionString: process.env.DATABASE_URL,
+			max: 2, // Very small pool just for AI - won't interfere with main app
+			idleTimeoutMillis: 10000,
+			connectionTimeoutMillis: 5000,
+		});
+		
+		let aiResponse;
+		try {
+			// Create optimized AI agent with its own isolated pool
+			const agent = new OptimizedNeigongAgent(aiPool);
+			
+			// Generate professional admin response (now lightweight & fast!)
+			aiResponse = await agent.handleQuery(questions, courseId);
+		} finally {
+			// Always close the AI-specific pool when done
+			try {
+				await aiPool.end();
+				console.log('AI database pool closed');
+			} catch (poolError) {
+				console.error('Error closing AI pool:', poolError);
+			}
+		}
+
+		console.log(`AI response generated for user ${userId}, scheduling message for 10-minute delay...`);
+
+		// Format as professional admin message (email-style with proper formatting)
+		const sessionRef = checkoutSessionId ? ` [Ref: ${checkoutSessionId.slice(-8)}]` : '';
+		const responseMessage = `Dear Student,
+
+Thank you for your written guidance questions. I have carefully reviewed your inquiry and am pleased to provide you with the following detailed response:
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+${aiResponse.response}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+I hope this guidance helps you in your martial arts journey. If you need further clarification or wish to discuss these concepts in real-time, please consider booking a Live Consultation for more personalized instruction.
+
+Wishing you continued progress in your training,
+
+The Jing Wu Method Team${sessionRef}
+📧 Contact us anytime for additional support
+🥋 Your martial arts mastery is our mission`;
+
+		// Wait 10 minutes before sending the message (10 * 60 * 1000 = 600,000ms)
+		setTimeout(async () => {
+			// Create fresh pool for delayed message sending
+			const { Pool: DelayedPool } = require('pg');
+			const delayedPool = new DelayedPool({
+				connectionString: process.env.DATABASE_URL,
+				max: 5,
+				idleTimeoutMillis: 30000,
+				connectionTimeoutMillis: 5000,
+			});
+
+			try {
+				console.log(`10-minute delay complete, sending written guidance response to user ${userId}...`);
+				
+				// Send via messaging system (not AI Sifu history)
+				const messageStore = new MessageStore(delayedPool);
+				const message = await messageStore.sendMessage(adminId, userId, responseMessage);
+
+				console.log(`Written guidance response sent successfully to user ${userId} via messaging system`);
+
+				// Update booking status from 'scheduled' to 'completed' AFTER message is sent
+				try {
+					const { BookingsStore } = require('../models/booking');
+					const bookingsStore = new BookingsStore(delayedPool);
+					
+					// Find the most recent written guidance booking for this user that is still scheduled
+					const delayedClient = await delayedPool.connect();
+					const bookingQuery = await delayedClient.query(`
+						SELECT id FROM bookings 
+						WHERE user_id = $1 
+						AND appointment_type = 'written_guidance' 
+						AND status = 'scheduled'
+						ORDER BY created_at DESC 
+						LIMIT 1
+					`, [userId]);
+					
+					if (bookingQuery.rows.length > 0) {
+						const bookingId = bookingQuery.rows[0].id;
+						await bookingsStore.updateBookingStatus(bookingId, 'completed');
+						console.log(`Updated booking ${bookingId} status to 'completed' for user ${userId} after 10-minute delay`);
+					} else {
+						console.log(`No scheduled written guidance booking found for user ${userId}`);
+					}
+					delayedClient.release();
+				} catch (bookingError) {
+					console.error(`Error updating booking status for user ${userId}:`, bookingError);
+				}
+			} catch (messageError) {
+				console.error(`Error sending delayed written guidance response to user ${userId}:`, messageError);
+			} finally {
+				// Always close the delayed pool
+				try {
+					await delayedPool.end();
+					console.log('Delayed pool closed successfully');
+				} catch (poolError) {
+					console.error('Error closing delayed pool:', poolError);
+				}
+			}
+		}, 10 * 60 * 1000); // 10 minutes delay
+
+		console.log(`Written guidance response scheduled for delivery in 10 minutes for user ${userId}`);
+		
+		// Note: Booking status will be updated to 'completed' after the 10-minute delay when message is sent
+	} catch (error) {
+		console.error('Error handling written guidance AI response:', error);
+		console.error('Error details:', error.message);
+		// Don't throw - this is background processing
+	} finally {
+		// Ensure connection is released if still held
+		if (client) {
+			client.release();
+		}
+		// Close the dedicated pool for this background task
+		try {
+			await pool.end();
+			console.log('Background task database pool closed');
+		} catch (poolError) {
+			console.error('Error closing background task pool:', poolError);
+		}
+	}
+}
 
 /**
  * Stripe Handlers - All business logic for Stripe operations
@@ -680,10 +864,28 @@ async function handleStripeEvent(event, pool) {
 				const orderStore = new OrderStore(pool);
 
 				try {
-					await orderStore.completeFromStripe(
+					const completedOrder = await orderStore.completeFromStripe(
 						checkout_session_id,
 						payment_intent
 					);
+
+					// Only trigger AI response if order was successfully completed AND payment is confirmed
+					if (metadata.appointment_type === 'written_guidance' && completedOrder && payment_status === 'paid') {
+						console.log(`Payment confirmed for written guidance order ${completedOrder.id}, triggering AI response for user ${metadata.user_id}`);
+						
+						// Don't await - run in background to avoid webhook timeout
+						// Pass minimal data to avoid holding webhook connections
+						setTimeout(() => {
+							handleWrittenGuidanceResponse(
+								parseInt(metadata.user_id),
+								metadata.notes,
+								metadata.course_id,
+								checkout_session_id // Pass session ID to prevent duplicates
+							).catch(error => {
+								console.error('Background AI response failed:', error);
+							});
+						}, 100); // Small delay to ensure webhook completes first
+					}
 				} catch (error) {
 					console.error('Failed to complete consultation order');
 				}

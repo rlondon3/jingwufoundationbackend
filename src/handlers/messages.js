@@ -5,6 +5,7 @@ const {
 	validateMessage,
 	validateConversation,
 } = require('../models/message');
+const { broadcastNewMessage, broadcastMessageRead } = require('./messageEvents');
 const {
 	authenticationToken,
 	authenticateUserId,
@@ -174,6 +175,12 @@ const sendMessage = async (req, res) => {
 			messageData.text
 		);
 
+		// Broadcast new message event to recipient via SSE
+		broadcastNewMessage(messageData.recipient_id, {
+			conversationId: message.conversation_id,
+			message: message
+		});
+
 		return res.status(201).json(message);
 	} catch (error) {
 		console.error('Send message error:', error);
@@ -217,6 +224,12 @@ const markConversationRead = async (req, res) => {
 
 		const store = new MessageStore(req.app.locals.pool);
 		const result = await store.markConversationRead(conversationId, userId);
+
+		// Broadcast message read event to user via SSE
+		broadcastMessageRead(userId, {
+			conversationId: conversationId,
+			readCount: result.messages_marked_read || 0
+		});
 
 		return res.status(200).json(result);
 	} catch (error) {

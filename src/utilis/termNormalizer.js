@@ -247,6 +247,26 @@ class JingwuTermNormalizer {
 			queryLower.includes(term.toLowerCase())
 		);
 	}
+
+	/**
+	 * Get definition for a specific Jingwu term
+	 * @param {string} termKey - The term key to look up
+	 * @returns {string|null} - The definition or null if not found
+	 */
+	getTermDefinition(termKey) {
+		const term = this.jingwuTerms[termKey];
+		if (term && term.definition) {
+			return term.definition;
+		}
+		
+		// Try reverse lookup
+		const reverseTerm = this.reverseTerms.get(termKey);
+		if (reverseTerm && this.jingwuTerms[reverseTerm.standard]) {
+			return this.jingwuTerms[reverseTerm.standard].definition;
+		}
+		
+		return null;
+	}
 }
 
 module.exports = JingwuTermNormalizer;

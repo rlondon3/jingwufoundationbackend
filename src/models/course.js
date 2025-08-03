@@ -19,6 +19,7 @@ class CourseStore {
 	 */
 	async index() {
 		try {
+			
 			const sql = `
         SELECT c.*, COUNT(m.id) as module_count 
         FROM courses c 
@@ -40,6 +41,7 @@ class CourseStore {
 	 */
 	async show(id) {
 		try {
+			
 			const client = await this.pool.connect();
 
 			// Get course basic info

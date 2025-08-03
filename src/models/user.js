@@ -1,6 +1,7 @@
 require('dotenv').config();
 const bcrypt = require('bcryptjs');
 const Joi = require('joi');
+const WelcomeMessageService = require('../utilis/welcomeMessageService');
 
 const { SALT_ROUNDS, PEPPER } = process.env;
 
@@ -82,7 +83,19 @@ class UserStore {
 			]);
 
 			client.release();
-			return res.rows[0];
+			
+			// Send welcome message to new user (async, don't block registration)
+			const newUser = res.rows[0];
+			if (!newUser.is_admin) { // Only send welcome messages to regular users, not admins
+				const welcomeService = new WelcomeMessageService(this.pool);
+				setImmediate(() => {
+					welcomeService.sendWelcomeMessage(newUser).catch(err => {
+						console.error('Failed to send welcome message:', err);
+					});
+				});
+			}
+			
+			return newUser;
 		} catch (error) {
 			throw new Error(`Could not add user: ${error}`);
 		}
