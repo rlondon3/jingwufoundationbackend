@@ -390,6 +390,78 @@ const createQACheckout = async (req, res) => {
 };
 
 /**
+ * Validate coupon code
+ * POST /stripe/validate-coupon
+ */
+const validateCoupon = async (req, res) => {
+	try {
+		const { coupon_code } = req.body;
+
+		if (!coupon_code) {
+			return res.status(400).json({ error: 'Coupon code is required' });
+		}
+
+		try {
+			// First try to find promotion code (customer-facing codes like "JINGWU50")
+			const promotionCodes = await stripe.promotionCodes.list({
+				code: coupon_code,
+				active: true,
+				limit: 1
+			});
+
+			let coupon;
+			let promotionCodeId;
+
+			if (promotionCodes.data.length > 0) {
+				// Found promotion code, get the associated coupon
+				const promotionCode = promotionCodes.data[0];
+				promotionCodeId = promotionCode.id;
+				coupon = promotionCode.coupon;
+			} else {
+				// Fallback: try as direct coupon ID
+				coupon = await stripe.coupons.retrieve(coupon_code);
+			}
+			
+			if (!coupon || !coupon.valid) {
+				return res.status(400).json({ 
+					valid: false, 
+					error: 'Invalid or expired coupon code' 
+				});
+			}
+
+			// Return coupon details for frontend display
+			const couponData = {
+				valid: true,
+				id: coupon_code, // Return the original code the user entered
+				coupon_id: coupon.id, // Actual Stripe coupon ID
+				promotion_code_id: promotionCodeId, // Stripe promotion code ID if applicable
+				name: coupon.name,
+				percent_off: coupon.percent_off,
+				amount_off: coupon.amount_off,
+				currency: coupon.currency,
+				duration: coupon.duration,
+				duration_in_months: coupon.duration_in_months,
+				max_redemptions: coupon.max_redemptions,
+				times_redeemed: coupon.times_redeemed,
+				created: coupon.created,
+				redeem_by: coupon.redeem_by
+			};
+
+			return res.status(200).json(couponData);
+		} catch (error) {
+			console.error('Coupon validation error:', error);
+			return res.status(400).json({ 
+				valid: false, 
+				error: 'Invalid coupon code' 
+			});
+		}
+	} catch (error) {
+		console.error('Validate coupon error:', error);
+		return res.status(500).json({ error: 'Failed to validate coupon' });
+	}
+};
+
+/**
  * Create checkout session
  * POST /stripe/create-checkout
  */
@@ -400,7 +472,8 @@ const createCheckout = async (req, res) => {
 			course_id, course_price, 
 			resource_id, resource_price, 
 			ai_sifu_subscription, ai_sifu_price,
-			qa_consultation, qa_consultation_type, qa_consultation_price, qa_session_name, qa_booking_data
+			qa_consultation, qa_consultation_type, qa_consultation_price, qa_session_name, qa_booking_data,
+			coupon_code
 		} = req.body;
 		const userId = req.user.id;
 
@@ -603,8 +676,38 @@ const createCheckout = async (req, res) => {
 			];
 		}
 
+		// Validate coupon code if provided
+		let discounts = [];
+		if (coupon_code) {
+			try {
+				// First try to find promotion code (customer-facing codes like "JINGWU50")
+				const promotionCodes = await stripe.promotionCodes.list({
+					code: coupon_code,
+					active: true,
+					limit: 1
+				});
+
+				if (promotionCodes.data.length > 0) {
+					// Found promotion code - use promotion_code in discounts
+					const promotionCode = promotionCodes.data[0];
+					discounts = [{ promotion_code: promotionCode.id }];
+				} else {
+					// Fallback: try as direct coupon ID
+					const coupon = await stripe.coupons.retrieve(coupon_code);
+					if (coupon && coupon.valid) {
+						discounts = [{ coupon: coupon_code }];
+					} else {
+						return res.status(400).json({ error: 'Invalid or expired coupon code' });
+					}
+				}
+			} catch (error) {
+				console.error('Coupon validation error:', error);
+				return res.status(400).json({ error: 'Invalid coupon code' });
+			}
+		}
+
 		// Create checkout session
-		const session = await stripe.checkout.sessions.create({
+		const sessionData = {
 			customer: customerId,
 			payment_method_types: ['card'],
 			line_items: lineItems,
@@ -619,8 +722,16 @@ const createCheckout = async (req, res) => {
 				is_qa_consultation: qa_consultation ? 'true' : 'false',
 				qa_consultation_type: qa_consultation_type || '',
 				qa_booking_data: qa_booking_data ? JSON.stringify(qa_booking_data) : '',
+				coupon_code: coupon_code || '',
 			},
-		});
+		};
+
+		// Add discounts if coupon is valid
+		if (discounts.length > 0) {
+			sessionData.discounts = discounts;
+		}
+
+		const session = await stripe.checkout.sessions.create(sessionData);
 
 		let order = null;
 		
@@ -1126,6 +1237,7 @@ const stripe_route = (app) => {
 
 	// Protected routes
 	app.post('/stripe/create-checkout', authenticationToken, createCheckout);
+	app.post('/stripe/validate-coupon', authenticationToken, validateCoupon);
 	app.post('/stripe/create-qa-checkout-session', createQACheckout); // Q&A checkout can be used by guests
 	app.post('/stripe/verify-payment', authenticationToken, verifyPayment);
 	app.get('/stripe/subscription/:userId', authenticateUserId, getSubscription);
