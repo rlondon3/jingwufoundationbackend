@@ -310,6 +310,13 @@ class UserStore {
 
 	async enrollUserInCourse(userId, courseId, startDate) {
 		try {
+			console.log('🚨 ENROLLMENT HAPPENING - enrollUserInCourse called:', {
+				userId,
+				courseId,
+				startDate,
+				stack: new Error().stack
+			});
+			
 			const sql = `
         INSERT INTO user_courses (user_id, course_id, start_date, progress, is_active) 
         VALUES ($1, $2, $3, $4, $5) RETURNING *

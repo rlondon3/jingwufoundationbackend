@@ -31,7 +31,6 @@ async function handleWrittenGuidanceResponse(userId, questions, courseId, checko
 	});
 	let client = null;
 	try {
-		console.log(`Processing written guidance response for user ${userId}, session: ${checkoutSessionId}`);
 		
 		// Use dedicated client for this long-running operation
 		client = await pool.connect();
@@ -50,7 +49,6 @@ async function handleWrittenGuidanceResponse(userId, questions, courseId, checko
 			`, [userId, checkoutSessionId.slice(-8)]); // Use last 8 chars of session ID as marker
 			
 			if (duplicateCheck.rows.length > 0) {
-				console.log(`Duplicate AI response prevented for session ${checkoutSessionId}, user ${userId}`);
 				return;
 			}
 		}
@@ -67,7 +65,6 @@ async function handleWrittenGuidanceResponse(userId, questions, courseId, checko
 		client.release();
 		client = null;
 
-		console.log(`Generating AI response for user ${userId}...`);
 		
 		// Create separate database pool ONLY for AI operations (completely isolated from main app)
 		const { Pool: AIPool } = require('pg');
@@ -89,13 +86,11 @@ async function handleWrittenGuidanceResponse(userId, questions, courseId, checko
 			// Always close the AI-specific pool when done
 			try {
 				await aiPool.end();
-				console.log('AI database pool closed');
 			} catch (poolError) {
 				console.error('Error closing AI pool:', poolError);
 			}
 		}
 
-		console.log(`AI response generated for user ${userId}, scheduling message for 10-minute delay...`);
 
 		// Format as professional admin message (email-style with proper formatting)
 		const sessionRef = checkoutSessionId ? ` [Ref: ${checkoutSessionId.slice(-8)}]` : '';
@@ -129,13 +124,11 @@ The Jing Wu Method Team${sessionRef}
 			});
 
 			try {
-				console.log(`10-minute delay complete, sending written guidance response to user ${userId}...`);
 				
 				// Send via messaging system (not AI Sifu history)
 				const messageStore = new MessageStore(delayedPool);
 				const message = await messageStore.sendMessage(adminId, userId, responseMessage);
 
-				console.log(`Written guidance response sent successfully to user ${userId} via messaging system`);
 
 				// Update booking status from 'scheduled' to 'completed' AFTER message is sent
 				try {
@@ -156,9 +149,7 @@ The Jing Wu Method Team${sessionRef}
 					if (bookingQuery.rows.length > 0) {
 						const bookingId = bookingQuery.rows[0].id;
 						await bookingsStore.updateBookingStatus(bookingId, 'completed');
-						console.log(`Updated booking ${bookingId} status to 'completed' for user ${userId} after 10-minute delay`);
 					} else {
-						console.log(`No scheduled written guidance booking found for user ${userId}`);
 					}
 					delayedClient.release();
 				} catch (bookingError) {
@@ -170,14 +161,12 @@ The Jing Wu Method Team${sessionRef}
 				// Always close the delayed pool
 				try {
 					await delayedPool.end();
-					console.log('Delayed pool closed successfully');
 				} catch (poolError) {
 					console.error('Error closing delayed pool:', poolError);
 				}
 			}
 		}, 10 * 60 * 1000); // 10 minutes delay
 
-		console.log(`Written guidance response scheduled for delivery in 10 minutes for user ${userId}`);
 		
 		// Note: Booking status will be updated to 'completed' after the 10-minute delay when message is sent
 	} catch (error) {
@@ -192,7 +181,6 @@ The Jing Wu Method Team${sessionRef}
 		// Close the dedicated pool for this background task
 		try {
 			await pool.end();
-			console.log('Background task database pool closed');
 		} catch (poolError) {
 			console.error('Error closing background task pool:', poolError);
 		}
@@ -755,7 +743,7 @@ const createCheckout = async (req, res) => {
 				// Create add-on order for resource (linked to course)
 				order = await orderStore.createAddOnOrder({
 					user_id: userId,
-					course_id: course_id,
+					course_id: course_id, // Keep course_id for resource tracking
 					resource_id: resource_id,
 					order_status: 'pending',
 					payment_method: 'stripe',
@@ -982,7 +970,6 @@ async function handleStripeEvent(event, pool) {
 
 					// Only trigger AI response if order was successfully completed AND payment is confirmed
 					if (metadata.appointment_type === 'written_guidance' && completedOrder && payment_status === 'paid') {
-						console.log(`Payment confirmed for written guidance order ${completedOrder.id}, triggering AI response for user ${metadata.user_id}`);
 						
 						// Don't await - run in background to avoid webhook timeout
 						// Pass minimal data to avoid holding webhook connections

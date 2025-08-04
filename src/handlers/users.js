@@ -171,7 +171,6 @@ const users_route = (app) => {
 					const publicId = extractPublicIdFromUrl(currentUser.avatar);
 					if (publicId) {
 						await deleteImageDirect(publicId);
-						console.log('Deleted old Cloudinary avatar:', publicId);
 					}
 				} catch (imageError) {
 					console.warn('Failed to delete old Cloudinary avatar:', imageError.message);
@@ -220,7 +219,6 @@ const users_route = (app) => {
 					const publicId = extractPublicIdFromUrl(userToDelete.avatar);
 					if (publicId) {
 						await deleteImageDirect(publicId);
-						console.log('Deleted Cloudinary avatar:', publicId);
 					}
 				} catch (imageError) {
 					console.warn('Failed to delete Cloudinary avatar:', imageError.message);
@@ -801,7 +799,6 @@ const users_route = (app) => {
 		const { id: userId, courseId } = req.params;
 
 		try {
-			console.log(`[API] calculateCourseProgressWithFeedback called for user ${userId}, course ${courseId}`);
 			
 			// Call the calculateCourseProgress method which includes feedback trigger checking
 			const result = await store.calculateCourseProgress(
@@ -809,7 +806,6 @@ const users_route = (app) => {
 				parseInt(courseId)
 			);
 
-			console.log(`[API] calculateCourseProgressWithFeedback result:`, result);
 
 			// Return the result (could be just progress number or object with feedbackTrigger)
 			return res.status(200).json(result);

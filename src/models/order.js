@@ -340,7 +340,21 @@ class OrderStore {
 			const completedOrder = orderRes.rows[0];
 
 			// Handle enrollment based on order type
-			if (!completedOrder.is_add_on && completedOrder.course_id) {
+			// CRITICAL FIX: Only enroll for DIRECT course purchases, not resource purchases
+			// A course purchase: is_add_on = false AND resource_id = null
+			// A resource purchase: is_add_on = true AND resource_id != null (should NOT enroll in course)
+			console.log('🐛 ORDER COMPLETION DEBUG:', {
+				order_id: completedOrder.id,
+				is_add_on: completedOrder.is_add_on,
+				resource_id: completedOrder.resource_id,
+				course_id: completedOrder.course_id,
+				item_name: completedOrder.item_name,
+				user_id: completedOrder.user_id,
+				shouldEnroll: completedOrder.is_add_on === false && completedOrder.resource_id === null
+			});
+			
+			if (completedOrder.is_add_on === false && completedOrder.resource_id === null) {
+				console.log('🎯 ENROLLING VIA ORDER COMPLETION - Course purchase detected');
 				// Course enrollment (existing logic)
 				const enrollmentSql = `
           INSERT INTO user_courses (user_id, course_id, start_date, progress) 
@@ -354,6 +368,8 @@ class OrderStore {
 					completedOrder.user_id,
 					completedOrder.course_id,
 				]);
+			} else {
+				console.log('❌ NOT ENROLLING - Resource purchase or add-on detected');
 			}
 			// For add-on orders, no additional enrollment needed - access is granted via order record
 

@@ -90,17 +90,21 @@ BEGIN
         -- Set completion timestamp
         NEW.completed_at := CURRENT_TIMESTAMP;
         
-        -- Add course to user's current_courses array (if not already there)
-        UPDATE users 
-        SET current_courses = array_append(current_courses, NEW.course_id),
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = NEW.user_id 
-        AND NOT (NEW.course_id = ANY(current_courses));
-        
-        -- Create user_courses entry for progress tracking
-        INSERT INTO user_courses (user_id, course_id, start_date, progress)
-        VALUES (NEW.user_id, NEW.course_id, CURRENT_DATE, 0)
-        ON CONFLICT (user_id, course_id) DO NOTHING;
+        -- CRITICAL FIX: Only enroll for DIRECT course purchases, not resource purchases
+        -- Only process if this is NOT an add-on (is_add_on = false) AND no resource_id
+        IF NEW.is_add_on = false AND NEW.resource_id IS NULL THEN
+            -- Add course to user's current_courses array (if not already there)
+            UPDATE users 
+            SET current_courses = array_append(current_courses, NEW.course_id),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = NEW.user_id 
+            AND NOT (NEW.course_id = ANY(current_courses));
+            
+            -- Create user_courses entry for progress tracking
+            INSERT INTO user_courses (user_id, course_id, start_date, progress)
+            VALUES (NEW.user_id, NEW.course_id, CURRENT_DATE, 0)
+            ON CONFLICT (user_id, course_id) DO NOTHING;
+        END IF;
         
     END IF;
     
