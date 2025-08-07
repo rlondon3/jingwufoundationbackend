@@ -626,6 +626,8 @@ function validateResource(resource) {
 		
 		// PDF and AI-specific fields
 		file_path: Joi.string().allow('', null),
+		file_size: Joi.number().integer().min(0).allow(null),
+		mime_type: Joi.string().max(100).allow('', null),
 		ai_category: Joi.string().valid('martial-arts', 'philosophy', 'meditation', 'forms', 'history', 'theory', 'practice').allow('', null),
 		term_normalizers: Joi.string().allow('', null),
 		content_tags: Joi.array().items(Joi.string()).default([]),

@@ -39,6 +39,33 @@ const pool = new Pool({
 	max: 20, // Maximum number of connections in the pool
 	idleTimeoutMillis: 30000, // Close idle connections after 30 seconds
 	connectionTimeoutMillis: 5000, // Return an error after 5 seconds if connection could not be established
+	allowExitOnIdle: true, // Allow pool to exit when idle
+});
+
+// Connection leak detection (development only)
+if (process.env.NODE_ENV === 'development') {
+	pool.on('connect', () => {
+		console.log('🔗 DB connection acquired');
+	});
+
+	pool.on('remove', () => {
+		console.log('❌ DB connection removed');
+	});
+
+	// Monitor pool usage every 30 seconds
+	setInterval(() => {
+		const total = pool.totalCount;
+		const idle = pool.idleCount;
+		const waiting = pool.waitingCount;
+		
+		if (total > 15 || waiting > 0) {
+			console.warn('⚠️  Pool warning - Total:', total, 'Idle:', idle, 'Waiting:', waiting);
+		}
+	}, 30000);
+}
+
+pool.on('error', (err) => {
+	console.error('❌ Pool error:', err.message);
 });
 
 // Make pool available to routes

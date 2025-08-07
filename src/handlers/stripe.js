@@ -10,6 +10,7 @@ const {
 	authenticationToken,
 	authenticateUserId,
 } = require('../middleware/auth');
+const puppeteer = require('puppeteer');
 
 const { OrderStore } = require('../models/order');
 const { MessageStore } = require('../models/message');
@@ -773,6 +774,256 @@ const createCheckout = async (req, res) => {
 };
 
 /**
+ * Create public shop checkout session (no auth required)
+ * POST /stripe/create-shop-checkout
+ */
+const createShopCheckout = async (req, res) => {
+	try {
+		const { 
+			resource_id, 
+			resource_price, 
+			success_url, 
+			cancel_url, 
+			mode = 'payment'
+		} = req.body;
+
+		if (!resource_id || !resource_price || !success_url || !cancel_url) {
+			return res.status(400).json({ error: 'Missing required parameters' });
+		}
+
+		// Create dynamic price for the resource
+		const priceData = {
+			currency: 'usd',
+			product_data: {
+				name: `Resource #${resource_id}`,
+				metadata: {
+					resource_id: resource_id.toString(),
+					course_id: '99999' // Special shop identifier
+				}
+			},
+			unit_amount: Math.round(resource_price * 100), // Convert to cents
+		};
+
+		// Create temporary customer for shop purchase
+		const customer = await stripe.customers.create({
+			metadata: {
+				is_shop_customer: 'true',
+				resource_id: resource_id.toString()
+			}
+		});
+
+		// Create checkout session with direct download redirect
+		const session = await stripe.checkout.sessions.create({
+			payment_method_types: ['card'],
+			line_items: [{
+				price_data: priceData,
+				quantity: 1,
+			}],
+			mode: mode,
+			success_url: success_url,
+			cancel_url: cancel_url,
+			customer: customer.id,
+			metadata: {
+				resource_id: resource_id.toString(),
+				course_id: '99999',
+				is_shop_purchase: 'true'
+			},
+		});
+
+		// Store order record in stripe_orders table
+		const stripeOrderStore = new StripeOrderStore(req.app.locals.pool);
+		await stripeOrderStore.create({
+			checkoutSessionId: session.id,
+			paymentIntentId: null,
+			customerId: customer.id,
+			amountSubtotal: Math.round(resource_price * 100),
+			amountTotal: Math.round(resource_price * 100),
+			currency: 'usd',
+			paymentStatus: 'pending',
+			status: 'pending'
+		});
+
+		return res.status(200).json({
+			sessionId: session.id,
+			url: session.url,
+			orderId: null
+		});
+
+	} catch (error) {
+		console.error('Shop checkout error:', error);
+		res.status(500).json({ error: 'Failed to create shop checkout session' });
+	}
+};
+
+/**
+ * Public resource download after shop purchase
+ * GET /stripe/shop-download/:sessionId
+ */
+const shopDownload = async (req, res) => {
+	try {
+		const { sessionId } = req.params;
+		
+		// Verify payment was completed
+		const stripeOrderStore = new StripeOrderStore(req.app.locals.pool);
+		const order = await stripeOrderStore.findByCheckoutSessionId(sessionId);
+		
+		// Get the Stripe session to verify payment status directly
+		const session = await stripe.checkout.sessions.retrieve(sessionId);
+		
+		if (!order) {
+			return res.status(404).json({ error: 'Order not found' });
+		}
+		
+		// Check payment status from Stripe session (more reliable than DB which might not be updated yet)
+		if (session.payment_status !== 'paid') {
+			return res.status(404).json({ error: 'Payment not completed yet' });
+		}
+		
+		// Extract resource info from session metadata
+		const resourceId = session.metadata?.resource_id;
+		
+		if (!resourceId) {
+			return res.status(404).json({ error: 'Resource not found' });
+		}
+		
+		// Get resource from database
+		const { ResourceStore } = require('../models/resource');
+		const resourceStore = new ResourceStore(req.app.locals.pool);
+		const resource = await resourceStore.show(parseInt(resourceId));
+		
+		if (!resource) {
+			return res.status(404).json({ error: 'Resource not found' });
+		}
+		
+		// Generate PDF using puppeteer for proper HTML rendering
+		const browser = await puppeteer.launch({
+			headless: true,
+			args: [
+				'--no-sandbox',
+				'--disable-setuid-sandbox',
+				'--disable-dev-shm-usage',
+				'--disable-accelerated-2d-canvas',
+				'--no-first-run',
+				'--no-zygote',
+				'--single-process',
+				'--disable-gpu'
+			]
+		});
+		
+		try {
+			const page = await browser.newPage();
+			
+			// Create properly formatted HTML content
+			const content = resource.type === 'manual' ? resource.content : resource.content?.replace(/\n/g, '<br>');
+			const htmlContent = `
+				<!DOCTYPE html>
+				<html>
+				<head>
+					<meta charset="utf-8">
+					<title>${resource.title}</title>
+				</head>
+				<body>
+					${content || 'No content available'}
+				</body>
+				</html>
+			`;
+			
+			// Set the HTML content
+			await page.setContent(htmlContent, {
+				waitUntil: 'networkidle0'
+			});
+			
+			// Generate PDF with no additional margins or styling
+			const pdfBuffer = await page.pdf({
+				format: 'A4',
+				printBackground: true,
+				margin: {
+					top: '0mm',
+					right: '0mm',
+					bottom: '0mm',
+					left: '0mm'
+				}
+			});
+			
+			await browser.close();
+			
+			// Set proper headers for PDF download
+			res.setHeader('Content-Type', 'application/pdf');
+			res.setHeader('Content-Disposition', `attachment; filename="${resource.title.replace(/[^a-zA-Z0-9]/g, '-')}.pdf"`);
+			res.setHeader('Content-Length', pdfBuffer.length);
+			
+			return res.send(pdfBuffer);
+		} catch (error) {
+			await browser.close();
+			throw error;
+		}
+		
+	} catch (error) {
+		console.error('Shop download error:', error);
+		res.status(500).json({ error: 'Failed to process download' });
+	}
+};
+
+/**
+ * Get resource info for shop purchase (without downloading)
+ * GET /stripe/shop-info/:sessionId
+ */
+const shopInfo = async (req, res) => {
+	try {
+		const { sessionId } = req.params;
+		
+		// Verify payment was completed
+		const stripeOrderStore = new StripeOrderStore(req.app.locals.pool);
+		const order = await stripeOrderStore.findByCheckoutSessionId(sessionId);
+		
+		// Get the Stripe session to verify payment status directly
+		const session = await stripe.checkout.sessions.retrieve(sessionId);
+		
+		if (!order) {
+			return res.status(404).json({ error: 'Order not found' });
+		}
+		
+		// Check payment status from Stripe session
+		if (session.payment_status !== 'paid') {
+			return res.status(404).json({ error: 'Payment not completed yet' });
+		}
+		
+		// Extract resource info from session metadata
+		const resourceId = session.metadata?.resource_id;
+		
+		if (!resourceId) {
+			return res.status(404).json({ error: 'Resource not found' });
+		}
+		
+		// Get resource from database
+		const { ResourceStore } = require('../models/resource');
+		const resourceStore = new ResourceStore(req.app.locals.pool);
+		const resource = await resourceStore.show(parseInt(resourceId));
+		
+		if (!resource) {
+			return res.status(404).json({ error: 'Resource not found' });
+		}
+		
+		// Return resource info as JSON
+		return res.json({
+			success: true,
+			resource: {
+				id: resource.id,
+				title: resource.title,
+				author: resource.author || 'JingWu Foundation',
+				type: resource.type || 'Resource',
+				category: resource.category
+			},
+			session_id: sessionId
+		});
+		
+	} catch (error) {
+		console.error('Shop info error:', error);
+		res.status(500).json({ error: 'Failed to get resource info' });
+	}
+};
+
+/**
  * Stripe webhook handler
  * POST /stripe/webhook
  */
@@ -943,18 +1194,20 @@ async function handleStripeEvent(event, pool) {
 				metadata
 			} = stripeData;
 
-			// Save to Stripe orders table
-			const stripeOrderStore = new StripeOrderStore(pool);
-			await stripeOrderStore.create({
-				checkoutSessionId: checkout_session_id,
-				paymentIntentId: payment_intent,
-				customerId,
-				amountSubtotal: amount_subtotal,
-				amountTotal: amount_total,
-				currency,
-				paymentStatus: payment_status,
-				status: 'completed',
-			});
+			// Save to Stripe orders table (skip for shop purchases - they're already created)
+			if (metadata?.is_shop_purchase !== 'true') {
+				const stripeOrderStore = new StripeOrderStore(pool);
+				await stripeOrderStore.create({
+					checkoutSessionId: checkout_session_id,
+					paymentIntentId: payment_intent,
+					customerId,
+					amountSubtotal: amount_subtotal,
+					amountTotal: amount_total,
+					currency,
+					paymentStatus: payment_status,
+					status: 'completed',
+				});
+			}
 
 			// Check if this is a Q&A consultation
 			if (metadata?.is_qa_booking === 'true') {
@@ -990,6 +1243,21 @@ async function handleStripeEvent(event, pool) {
 
 				// Note: Booking is already created by frontend before payment
 				// Webhook only handles payment/order completion
+			} else if (metadata?.is_shop_purchase === 'true') {
+				// Handle shop resource purchase - update existing stripe_orders record
+				console.log(`Shop purchase completed for resource ${metadata.resource_id}, session: ${checkout_session_id}`);
+				
+				// Update the existing stripe_orders record with payment details
+				const stripeOrderStore = new StripeOrderStore(pool);
+				try {
+					await stripeOrderStore.updatePaymentStatus(checkout_session_id, {
+						paymentIntentId: payment_intent,
+						paymentStatus: 'paid',
+						status: 'completed'
+					});
+				} catch (error) {
+					console.error('Failed to update shop purchase payment status:', error);
+				}
 			} else {
 				// Complete the main order (course/resource enrollment)
 				const { OrderStore } = require('../models/order');
@@ -1222,10 +1490,15 @@ const stripe_route = (app) => {
 	// Public webhook endpoint (must use raw body parser)
 	app.post('/stripe/webhook', webhook);
 
+	// Public routes
+	app.post('/stripe/create-qa-checkout-session', createQACheckout); // Q&A checkout can be used by guests
+	app.post('/stripe/create-shop-checkout', createShopCheckout); // Shop checkout for public purchases
+	app.get('/stripe/shop-download/:sessionId', shopDownload); // Public download after shop purchase
+	app.get('/stripe/shop-info/:sessionId', shopInfo); // Get resource info without download
+
 	// Protected routes
 	app.post('/stripe/create-checkout', authenticationToken, createCheckout);
 	app.post('/stripe/validate-coupon', authenticationToken, validateCoupon);
-	app.post('/stripe/create-qa-checkout-session', createQACheckout); // Q&A checkout can be used by guests
 	app.post('/stripe/verify-payment', authenticationToken, verifyPayment);
 	app.get('/stripe/subscription/:userId', authenticateUserId, getSubscription);
 	app.get('/stripe/orders/:userId', authenticateUserId, getOrders);

@@ -253,6 +253,24 @@ class StripeOrderStore {
 			);
 		}
 	}
+
+	async updatePaymentStatus(checkoutSessionId, updateData) {
+		try {
+			const { paymentIntentId, paymentStatus, status } = updateData;
+			const query = `
+				UPDATE stripe_orders 
+				SET payment_intent_id = $2, payment_status = $3, status = $4, updated_at = NOW()
+				WHERE checkout_session_id = $1 AND deleted_at IS NULL
+				RETURNING *
+			`;
+			const client = await this.pool.connect();
+			const result = await client.query(query, [checkoutSessionId, paymentIntentId, paymentStatus, status]);
+			client.release();
+			return result.rows[0];
+		} catch (error) {
+			throw new Error(`Could not update stripe order payment status: ${error}`);
+		}
+	}
 }
 
 module.exports = {
