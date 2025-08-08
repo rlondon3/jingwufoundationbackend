@@ -38,12 +38,14 @@ module.exports = (app) => {
 		}
 	});
 
-	// Optional: Cleanup old backups (keep last 30 days) at 3 AM UTC
-	cron.schedule('0 3 * * *', async () => {
+	// Optional: Cleanup old backups (keep last 14 days) at 3 AM UTC
+	cron.schedule('0 3 * * 0', async () => {
 		console.log('🔄 Running backup cleanup...');
 		try {
-			const result = await backupService.cleanupOldBackups(30); // Keep last 30 days
-			console.log(`✅ Backup cleanup completed - deleted ${result.deletedCount} old backups`);
+			const result = await backupService.cleanupOldBackups(14); // Keep last 14 days
+			console.log(
+				`✅ Backup cleanup completed - deleted ${result.deletedCount} old backups`
+			);
 		} catch (error) {
 			console.error('❌ Backup cleanup failed:', error);
 		}
