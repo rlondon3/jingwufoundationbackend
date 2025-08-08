@@ -26,6 +26,7 @@ const blog_route = require('./handlers/blogs');
 const testimonials_route = require('./handlers/testimonials');
 const guided_feedback_route = require('./handlers/guidedFeedback');
 const subscriptions_route = require('./handlers/subscriptions');
+const coursePreviews_route = require('./handlers/coursePreviews');
 const { checkAndProcessContent } = require('../scripts/processContentChunks');
 const { checkAndImportPDFs } = require('../scripts/addPDFResources');
 
@@ -162,6 +163,7 @@ blog_route(app);
 testimonials_route(app);
 guided_feedback_route(app);
 subscriptions_route(app);
+coursePreviews_route(app);
 
 // Error handling for unhandled promise rejections
 process.on('unhandledRejection', (reason, promise) => {
