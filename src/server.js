@@ -27,6 +27,7 @@ const testimonials_route = require('./handlers/testimonials');
 const guided_feedback_route = require('./handlers/guidedFeedback');
 const subscriptions_route = require('./handlers/subscriptions');
 const coursePreviews_route = require('./handlers/coursePreviews');
+const backup_routes = require('./handlers/backupRoutes');
 const { checkAndProcessContent } = require('../scripts/processContentChunks');
 const { checkAndImportPDFs } = require('../scripts/addPDFResources');
 
@@ -58,9 +59,16 @@ if (process.env.NODE_ENV === 'development') {
 		const total = pool.totalCount;
 		const idle = pool.idleCount;
 		const waiting = pool.waitingCount;
-		
+
 		if (total > 15 || waiting > 0) {
-			console.warn('⚠️  Pool warning - Total:', total, 'Idle:', idle, 'Waiting:', waiting);
+			console.warn(
+				'⚠️  Pool warning - Total:',
+				total,
+				'Idle:',
+				idle,
+				'Waiting:',
+				waiting
+			);
 		}
 	}, 30000);
 }
@@ -164,6 +172,7 @@ testimonials_route(app);
 guided_feedback_route(app);
 subscriptions_route(app);
 coursePreviews_route(app);
+backup_routes(app);
 
 // Error handling for unhandled promise rejections
 process.on('unhandledRejection', (reason, promise) => {
@@ -182,10 +191,10 @@ const gracefulShutdown = async (signal) => {
 		console.log('🔄 Shutdown already in progress...');
 		return;
 	}
-	
+
 	isShuttingDown = true;
 	console.log(`\n🔄 Shutting down gracefully... (${signal})`);
-	
+
 	try {
 		// Close database connections
 		console.log('🔄 Closing database connections...');
@@ -193,10 +202,9 @@ const gracefulShutdown = async (signal) => {
 			await pool.end();
 			console.log('✅ Database connections closed');
 		}
-		
+
 		console.log('✅ Graceful shutdown complete');
 		process.exit(0);
-		
 	} catch (error) {
 		console.error('❌ Error during shutdown:', error.message);
 		process.exit(1);
@@ -211,13 +219,13 @@ const server = app.listen(PORT, async function () {
 	console.log(`🚀 Starting app using the server on ${address}`);
 	console.log(`📋 Environment: ${process.env.NODE_ENV || 'development'}`);
 	await testConnection();
-	
+
 	// Auto-import PDF files and process content chunks on startup
 	console.log('🔄 Starting PDF import and content processing...');
-	
+
 	// Step 1: Import any new PDF files from assets/resources
 	await checkAndImportPDFs();
-	
+
 	// Step 2: Process content chunks (includes new PDFs)
 	await checkAndProcessContent();
 	console.log('✅ PDF import and content processing completed');
