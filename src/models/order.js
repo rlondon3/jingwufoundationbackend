@@ -103,6 +103,30 @@ class OrderStore {
 	}
 
 	/**
+	 * Get order by PayPal order ID
+	 */
+	async getByPayPalOrder(paypalOrderId) {
+		try {
+			const sql = `
+        SELECT o.*, u.name as user_name, u.email as user_email,
+               c.title as course_title, c.category as course_category,
+               r.title as resource_title, r.type as resource_type
+        FROM orders o
+        JOIN users u ON o.user_id = u.id
+        LEFT JOIN courses c ON o.course_id = c.id
+        LEFT JOIN resources r ON o.resource_id = r.id
+        WHERE o.paypal_order_id = $1
+      `;
+			const client = await this.pool.connect();
+			const res = await client.query(sql, [paypalOrderId]);
+			client.release();
+			return res.rows[0];
+		} catch (error) {
+			throw new Error(`Can't find order by PayPal order ID: ${error}`);
+		}
+	}
+
+	/**
 	 * Create new course order (existing flow - unchanged)
 	 */
 	async create(order) {
@@ -140,9 +164,9 @@ class OrderStore {
 			// Create course order
 			const sql = `
         INSERT INTO orders (user_id, course_id, course_price, order_status, 
-                           payment_method, stripe_checkout_session_id, notes,
+                           payment_method, stripe_checkout_session_id, paypal_order_id, notes,
                            is_add_on, item_name)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *
       `;
 
 			const res = await client.query(sql, [
@@ -152,6 +176,7 @@ class OrderStore {
 				order.order_status || 'pending',
 				order.payment_method || 'stripe',
 				order.stripe_checkout_session_id || null,
+				order.paypal_order_id || null,
 				order.notes || null,
 				false, // is_add_on = false for course orders
 				courseTitle,
@@ -209,9 +234,9 @@ class OrderStore {
 			// Create add-on order
 			const sql = `
         INSERT INTO orders (user_id, course_id, resource_id, add_on_price, course_price, order_status, 
-                           payment_method, stripe_checkout_session_id, notes,
+                           payment_method, stripe_checkout_session_id, paypal_order_id, notes,
                            is_add_on, item_name)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *
       `;
 
 			const res = await client.query(sql, [
@@ -223,6 +248,7 @@ class OrderStore {
 				order.order_status || 'pending',
 				order.payment_method || 'stripe',
 				order.stripe_checkout_session_id || null,
+				order.paypal_order_id || null,
 				order.notes || null,
 				true, // is_add_on = true for add-on orders
 				resourceTitle,
@@ -350,28 +376,13 @@ class OrderStore {
 				course_id: completedOrder.course_id,
 				item_name: completedOrder.item_name,
 				user_id: completedOrder.user_id,
-				shouldEnroll: completedOrder.is_add_on === false && completedOrder.resource_id === null
+				note: 'Enrollment handled by database trigger - no application logic needed'
 			});
 			
-			if (completedOrder.is_add_on === false && completedOrder.resource_id === null) {
-				console.log('🎯 ENROLLING VIA ORDER COMPLETION - Course purchase detected');
-				// Course enrollment (existing logic)
-				const enrollmentSql = `
-          INSERT INTO user_courses (user_id, course_id, start_date, progress) 
-          VALUES ($1, $2, CURRENT_TIMESTAMP, 0) 
-          ON CONFLICT (user_id, course_id) DO UPDATE SET 
-            start_date = CURRENT_TIMESTAMP,
-            progress = 0
-          RETURNING *
-        `;
-				await client.query(enrollmentSql, [
-					completedOrder.user_id,
-					completedOrder.course_id,
-				]);
-			} else {
-				console.log('❌ NOT ENROLLING - Resource purchase or add-on detected');
-			}
-			// For add-on orders, no additional enrollment needed - access is granted via order record
+			// NOTE: Course enrollment is now handled entirely by the database trigger
+			// The handle_order_completion() trigger automatically enrolls users when:
+			// - is_add_on = false AND resource_id IS NULL (direct course purchases only)
+			// This prevents duplicate enrollment logic and ensures consistency
 
 			await client.query('COMMIT');
 
@@ -379,6 +390,60 @@ class OrderStore {
 		} catch (error) {
 			await client.query('ROLLBACK');
 			throw new Error(`Could not complete order from Stripe: ${error}`);
+		} finally {
+			client.release();
+		}
+	}
+
+	/**
+	 * Complete order from PayPal webhook (handles both courses and add-ons)
+	 */
+	async completeFromPayPal(paypalOrderId, paypalCaptureId = null) {
+		const client = await this.pool.connect();
+		try {
+			await client.query('BEGIN');
+
+			// Update order status
+			console.log('🔍 Looking for order with PayPal order ID:', paypalOrderId);
+			
+			// First check what orders exist for debugging
+			const debugSql = `SELECT id, paypal_order_id, resource_id, user_id, order_status FROM orders WHERE paypal_order_id IS NOT NULL ORDER BY created_at DESC LIMIT 5`;
+			const debugRes = await client.query(debugSql);
+			console.log('🔍 Recent orders with PayPal IDs:', debugRes.rows);
+			
+			const orderSql = `
+        UPDATE orders SET 
+          order_status = 'completed',
+          paypal_capture_id = COALESCE($2, paypal_capture_id),
+          completed_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP,
+          notes = 'Payment completed via PayPal'
+        WHERE paypal_order_id = $1 RETURNING *
+      `;
+			const orderRes = await client.query(orderSql, [
+				paypalOrderId,
+				paypalCaptureId,
+			]);
+
+			console.log('🔍 Query result rows found:', orderRes.rows.length);
+			if (orderRes.rows.length === 0) {
+				throw new Error('Order not found for PayPal order');
+			}
+
+			const completedOrder = orderRes.rows[0];
+
+			// Handle enrollment based on order type
+			
+			// NOTE: Course enrollment is now handled entirely by the database trigger
+			// The handle_order_completion() trigger automatically enrolls users when:
+			// - is_add_on = false AND resource_id IS NULL (direct course purchases only)
+			// This prevents duplicate enrollment logic and ensures consistency
+
+			await client.query('COMMIT');
+			return completedOrder;
+		} catch (error) {
+			await client.query('ROLLBACK');
+			throw new Error(`Could not complete order from PayPal: ${error}`);
 		} finally {
 			client.release();
 		}

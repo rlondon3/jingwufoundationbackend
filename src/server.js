@@ -7,6 +7,7 @@ const morgan = require('morgan');
 const users_route = require('./handlers/users');
 const courses_route = require('./handlers/courses');
 const stripeRoute = require('./handlers/stripe');
+const paypalRoute = require('./handlers/paypal');
 const ordersRoute = require('./handlers/orders');
 const messagesRoute = require('./handlers/messages');
 const messageEventsRoute = require('./handlers/messageEvents');
@@ -136,6 +137,7 @@ app.use((req, res, next) => {
 });
 
 app.use('/stripe/webhook', express.raw({ type: 'application/json' }));
+app.use('/paypal/webhook', express.raw({ type: 'application/json' }));
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
@@ -153,6 +155,7 @@ users_route(app);
 health_route(app);
 courses_route(app);
 stripeRoute(app);
+paypalRoute(app);
 ordersRoute(app);
 messagesRoute(app);
 messageEventsRoute(app);

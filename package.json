@@ -19,6 +19,7 @@
 		"@aws-sdk/client-s3": "^3.863.0",
 		"@langchain/anthropic": "^0.3.23",
 		"@langchain/core": "^0.3.61",
+		"@paypal/paypal-server-sdk": "^1.1.0",
 		"bcryptjs": "^3.0.2",
 		"child_process": "^1.0.2",
 		"cors": "^2.8.5",

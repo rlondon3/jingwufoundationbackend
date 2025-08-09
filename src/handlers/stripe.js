@@ -21,7 +21,12 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 /**
  * Handle AI Sifu response for written guidance (async background processing)
  */
-async function handleWrittenGuidanceResponse(userId, questions, courseId, checkoutSessionId = null) {
+async function handleWrittenGuidanceResponse(
+	userId,
+	questions,
+	courseId,
+	checkoutSessionId = null
+) {
 	// Create fresh database pool for this background task
 	const { Pool } = require('pg');
 	const pool = new Pool({
@@ -32,13 +37,13 @@ async function handleWrittenGuidanceResponse(userId, questions, courseId, checko
 	});
 	let client = null;
 	try {
-		
 		// Use dedicated client for this long-running operation
 		client = await pool.connect();
-		
+
 		// Check if we've already processed this session to prevent duplicates
 		if (checkoutSessionId) {
-			const duplicateCheck = await client.query(`
+			const duplicateCheck = await client.query(
+				`
 				SELECT m.id FROM messages m
 				JOIN conversations c ON m.conversation_id = c.id
 				WHERE m.sender_id = (SELECT id FROM users WHERE is_admin = true LIMIT 1)
@@ -47,26 +52,29 @@ async function handleWrittenGuidanceResponse(userId, questions, courseId, checko
 				AND m.sent_at > NOW() - INTERVAL '1 hour'
 				AND m.text LIKE '%' || $2 || '%'
 				LIMIT 1
-			`, [userId, checkoutSessionId.slice(-8)]); // Use last 8 chars of session ID as marker
-			
+			`,
+				[userId, checkoutSessionId.slice(-8)]
+			); // Use last 8 chars of session ID as marker
+
 			if (duplicateCheck.rows.length > 0) {
 				return;
 			}
 		}
-		
+
 		// Get admin user ID
-		const adminQuery = await client.query('SELECT id FROM users WHERE is_admin = true LIMIT 1');
+		const adminQuery = await client.query(
+			'SELECT id FROM users WHERE is_admin = true LIMIT 1'
+		);
 		if (adminQuery.rows.length === 0) {
 			console.error('No admin user found for AI Sifu responses');
 			return;
 		}
 		const adminId = adminQuery.rows[0].id;
-		
+
 		// Release connection before AI call (which takes time)
 		client.release();
 		client = null;
 
-		
 		// Create separate database pool ONLY for AI operations (completely isolated from main app)
 		const { Pool: AIPool } = require('pg');
 		const aiPool = new AIPool({
@@ -75,12 +83,12 @@ async function handleWrittenGuidanceResponse(userId, questions, courseId, checko
 			idleTimeoutMillis: 10000,
 			connectionTimeoutMillis: 5000,
 		});
-		
+
 		let aiResponse;
 		try {
 			// Create optimized AI agent with its own isolated pool
 			const agent = new OptimizedNeigongAgent(aiPool);
-			
+
 			// Generate professional admin response (now lightweight & fast!)
 			aiResponse = await agent.handleQuery(questions, courseId);
 		} finally {
@@ -92,9 +100,10 @@ async function handleWrittenGuidanceResponse(userId, questions, courseId, checko
 			}
 		}
 
-
 		// Format as professional admin message (email-style with proper formatting)
-		const sessionRef = checkoutSessionId ? ` [Ref: ${checkoutSessionId.slice(-8)}]` : '';
+		const sessionRef = checkoutSessionId
+			? ` [Ref: ${checkoutSessionId.slice(-8)}]`
+			: '';
 		const responseMessage = `Dear Student,
 
 Thank you for your written guidance questions. I have carefully reviewed your inquiry and am pleased to provide you with the following detailed response:
@@ -125,28 +134,33 @@ The Jing Wu Method Team${sessionRef}
 			});
 
 			try {
-				
 				// Send via messaging system (not AI Sifu history)
 				const messageStore = new MessageStore(delayedPool);
-				const message = await messageStore.sendMessage(adminId, userId, responseMessage);
-
+				const message = await messageStore.sendMessage(
+					adminId,
+					userId,
+					responseMessage
+				);
 
 				// Update booking status from 'scheduled' to 'completed' AFTER message is sent
 				try {
 					const { BookingsStore } = require('../models/booking');
 					const bookingsStore = new BookingsStore(delayedPool);
-					
+
 					// Find the most recent written guidance booking for this user that is still scheduled
 					const delayedClient = await delayedPool.connect();
-					const bookingQuery = await delayedClient.query(`
+					const bookingQuery = await delayedClient.query(
+						`
 						SELECT id FROM bookings 
 						WHERE user_id = $1 
 						AND appointment_type = 'written_guidance' 
 						AND status = 'scheduled'
 						ORDER BY created_at DESC 
 						LIMIT 1
-					`, [userId]);
-					
+					`,
+						[userId]
+					);
+
 					if (bookingQuery.rows.length > 0) {
 						const bookingId = bookingQuery.rows[0].id;
 						await bookingsStore.updateBookingStatus(bookingId, 'completed');
@@ -154,10 +168,16 @@ The Jing Wu Method Team${sessionRef}
 					}
 					delayedClient.release();
 				} catch (bookingError) {
-					console.error(`Error updating booking status for user ${userId}:`, bookingError);
+					console.error(
+						`Error updating booking status for user ${userId}:`,
+						bookingError
+					);
 				}
 			} catch (messageError) {
-				console.error(`Error sending delayed written guidance response to user ${userId}:`, messageError);
+				console.error(
+					`Error sending delayed written guidance response to user ${userId}:`,
+					messageError
+				);
 			} finally {
 				// Always close the delayed pool
 				try {
@@ -168,7 +188,6 @@ The Jing Wu Method Team${sessionRef}
 			}
 		}, 10 * 60 * 1000); // 10 minutes delay
 
-		
 		// Note: Booking status will be updated to 'completed' after the 10-minute delay when message is sent
 	} catch (error) {
 		console.error('Error handling written guidance AI response:', error);
@@ -198,19 +217,19 @@ The Jing Wu Method Team${sessionRef}
  */
 const createQACheckout = async (req, res) => {
 	try {
-		const { 
-			appointment_type, 
-			full_name, 
-			email, 
-			phone_number, 
-			start_time, 
-			end_time, 
-			notes, 
-			user_id, 
-			price, 
-			session_name, 
+		const {
+			appointment_type,
+			full_name,
+			email,
+			phone_number,
+			start_time,
+			end_time,
+			notes,
+			user_id,
+			price,
+			session_name,
 			is_subscription,
-			course_id
+			course_id,
 		} = req.body;
 
 		if (!appointment_type || !full_name || !email || !price || !session_name) {
@@ -248,7 +267,7 @@ const createQACheckout = async (req, res) => {
 		// Create line items based on appointment type
 		let lineItems;
 		const mode = is_subscription ? 'subscription' : 'payment';
-		
+
 		if (is_subscription) {
 			// For intensive mentorship subscription
 			lineItems = [
@@ -257,7 +276,8 @@ const createQACheckout = async (req, res) => {
 						currency: 'usd',
 						product_data: {
 							name: session_name,
-							description: 'Monthly subscription • Weekly 20-min calls • 3 questions/week • Advanced training',
+							description:
+								'Monthly subscription • Weekly 20-min calls • 3 questions/week • Advanced training',
 							metadata: {
 								appointment_type: appointment_type,
 								is_qa_booking: 'true',
@@ -276,10 +296,12 @@ const createQACheckout = async (req, res) => {
 			let description;
 			switch (appointment_type) {
 				case 'written_guidance':
-					description = 'Submit up to 5 written questions • 72-hour written response';
+					description =
+						'Submit up to 5 written questions • 72-hour written response';
 					break;
 				case 'video_review':
-					description = 'Submit practice video + 3 questions • Video response within 72hrs';
+					description =
+						'Submit practice video + 3 questions • Video response within 72hrs';
 					break;
 				case 'live_consultation':
 					description = '20-minute scheduled Zoom call';
@@ -310,7 +332,7 @@ const createQACheckout = async (req, res) => {
 		// Create appropriate success/cancel URLs based on appointment type
 		let success_url, cancel_url;
 		const courseParam = course_id ? `&course_id=${course_id}` : '';
-		
+
 		if (is_subscription && appointment_type === 'intensive_mentorship') {
 			// Intensive mentorship subscription
 			success_url = `${process.env.FRONTEND_URL}/payment/success?session_id={CHECKOUT_SESSION_ID}&intensive_mentorship_subscription=true${courseParam}`;
@@ -349,7 +371,7 @@ const createQACheckout = async (req, res) => {
 		if (user_id) {
 			const { OrderStore } = require('../models/order');
 			const orderStore = new OrderStore(req.app.locals.pool);
-			
+
 			try {
 				order = await orderStore.createConsultationOrder({
 					user_id: user_id,
@@ -367,10 +389,10 @@ const createQACheckout = async (req, res) => {
 			}
 		}
 
-		res.json({ 
-			sessionId: session.id, 
+		res.json({
+			sessionId: session.id,
 			url: session.url,
-			orderId: order?.id || null
+			orderId: order?.id || null,
 		});
 	} catch (error) {
 		console.error('Q&A Checkout error:', error);
@@ -395,7 +417,7 @@ const validateCoupon = async (req, res) => {
 			const promotionCodes = await stripe.promotionCodes.list({
 				code: coupon_code,
 				active: true,
-				limit: 1
+				limit: 1,
 			});
 
 			let coupon;
@@ -410,11 +432,11 @@ const validateCoupon = async (req, res) => {
 				// Fallback: try as direct coupon ID
 				coupon = await stripe.coupons.retrieve(coupon_code);
 			}
-			
+
 			if (!coupon || !coupon.valid) {
-				return res.status(400).json({ 
-					valid: false, 
-					error: 'Invalid or expired coupon code' 
+				return res.status(400).json({
+					valid: false,
+					error: 'Invalid or expired coupon code',
 				});
 			}
 
@@ -433,15 +455,15 @@ const validateCoupon = async (req, res) => {
 				max_redemptions: coupon.max_redemptions,
 				times_redeemed: coupon.times_redeemed,
 				created: coupon.created,
-				redeem_by: coupon.redeem_by
+				redeem_by: coupon.redeem_by,
 			};
 
 			return res.status(200).json(couponData);
 		} catch (error) {
 			console.error('Coupon validation error:', error);
-			return res.status(400).json({ 
-				valid: false, 
-				error: 'Invalid coupon code' 
+			return res.status(400).json({
+				valid: false,
+				error: 'Invalid coupon code',
 			});
 		}
 	} catch (error) {
@@ -456,13 +478,23 @@ const validateCoupon = async (req, res) => {
  */
 const createCheckout = async (req, res) => {
 	try {
-		const { 
-			price_id, success_url, cancel_url, mode, 
-			course_id, course_price, 
-			resource_id, resource_price, 
-			ai_sifu_subscription, ai_sifu_price,
-			qa_consultation, qa_consultation_type, qa_consultation_price, qa_session_name, qa_booking_data,
-			coupon_code
+		const {
+			price_id,
+			success_url,
+			cancel_url,
+			mode,
+			course_id,
+			course_price,
+			resource_id,
+			resource_price,
+			ai_sifu_subscription,
+			ai_sifu_price,
+			qa_consultation,
+			qa_consultation_type,
+			qa_consultation_price,
+			qa_session_name,
+			qa_booking_data,
+			coupon_code,
 		} = req.body;
 		const userId = req.user.id;
 
@@ -479,18 +511,33 @@ const createCheckout = async (req, res) => {
 		}
 
 		// For purchases, we need either a price_id, course_id + course_price, resource_id + resource_price, ai_sifu_subscription + ai_sifu_price, or qa_consultation + qa_consultation_price
-		if (mode === 'payment' && !price_id && (!course_id || !course_price) && (!resource_id || !resource_price) && !ai_sifu_subscription && (!qa_consultation || !qa_consultation_price)) {
-			return res.status(400).json({ error: 'For purchases, provide either price_id, course_id + course_price, resource_id + resource_price, ai_sifu_subscription + ai_sifu_price, or qa_consultation + qa_consultation_price' });
+		if (
+			mode === 'payment' &&
+			!price_id &&
+			(!course_id || !course_price) &&
+			(!resource_id || !resource_price) &&
+			!ai_sifu_subscription &&
+			(!qa_consultation || !qa_consultation_price)
+		) {
+			return res.status(400).json({
+				error:
+					'For purchases, provide either price_id, course_id + course_price, resource_id + resource_price, ai_sifu_subscription + ai_sifu_price, or qa_consultation + qa_consultation_price',
+			});
 		}
-		
+
 		// For AI Sifu subscriptions, we need ai_sifu_price
 		if (mode === 'subscription' && ai_sifu_subscription && !ai_sifu_price) {
-			return res.status(400).json({ error: 'For AI Sifu subscriptions, ai_sifu_price is required' });
+			return res.status(400).json({
+				error: 'For AI Sifu subscriptions, ai_sifu_price is required',
+			});
 		}
-		
+
 		// For Q&A consultations, we need qa_consultation_price and qa_session_name
 		if (qa_consultation && (!qa_consultation_price || !qa_session_name)) {
-			return res.status(400).json({ error: 'For Q&A consultations, qa_consultation_price and qa_session_name are required' });
+			return res.status(400).json({
+				error:
+					'For Q&A consultations, qa_consultation_price and qa_session_name are required',
+			});
 		}
 
 		// Initialize stores
@@ -586,7 +633,9 @@ const createCheckout = async (req, res) => {
 						currency: 'usd',
 						product_data: {
 							name: resourceName,
-							description: `Access to ${resourceName} ${resourceType === 'manual' ? 'manual' : resourceType} content`,
+							description: `Access to ${resourceName} ${
+								resourceType === 'manual' ? 'manual' : resourceType
+							} content`,
 							metadata: {
 								resource_id: resource_id.toString(),
 							},
@@ -604,7 +653,8 @@ const createCheckout = async (req, res) => {
 						currency: 'usd',
 						product_data: {
 							name: 'AI Sifu Monthly Subscription',
-							description: 'Get unlimited access to your personal AI martial arts guide with 12 questions monthly',
+							description:
+								'Get unlimited access to your personal AI martial arts guide with 12 questions monthly',
 							metadata: {
 								is_ai_sifu_subscription: 'true',
 							},
@@ -622,16 +672,19 @@ const createCheckout = async (req, res) => {
 			let description;
 			switch (qa_consultation_type) {
 				case 'written_guidance':
-					description = 'Submit up to 5 written questions • 72-hour written response';
+					description =
+						'Submit up to 5 written questions • 72-hour written response';
 					break;
 				case 'video_review':
-					description = 'Submit practice video + 3 questions • Video response within 72hrs';
+					description =
+						'Submit practice video + 3 questions • Video response within 72hrs';
 					break;
 				case 'live_consultation':
 					description = '20-minute scheduled Zoom call';
 					break;
 				case 'intensive_mentorship':
-					description = 'Monthly subscription • Weekly 20-min calls • 3 questions/week • Advanced training';
+					description =
+						'Monthly subscription • Weekly 20-min calls • 3 questions/week • Advanced training';
 					break;
 				default:
 					description = `${qa_session_name} consultation`;
@@ -673,7 +726,7 @@ const createCheckout = async (req, res) => {
 				const promotionCodes = await stripe.promotionCodes.list({
 					code: coupon_code,
 					active: true,
-					limit: 1
+					limit: 1,
 				});
 
 				if (promotionCodes.data.length > 0) {
@@ -686,7 +739,9 @@ const createCheckout = async (req, res) => {
 					if (coupon && coupon.valid) {
 						discounts = [{ coupon: coupon_code }];
 					} else {
-						return res.status(400).json({ error: 'Invalid or expired coupon code' });
+						return res
+							.status(400)
+							.json({ error: 'Invalid or expired coupon code' });
 					}
 				}
 			} catch (error) {
@@ -723,7 +778,7 @@ const createCheckout = async (req, res) => {
 		const session = await stripe.checkout.sessions.create(sessionData);
 
 		let order = null;
-		
+
 		// Only create orders for course/resource/consultation purchases, not AI Sifu subscriptions
 		if (!ai_sifu_subscription) {
 			const orderStore = new OrderStore(req.app.locals.pool);
@@ -762,10 +817,10 @@ const createCheckout = async (req, res) => {
 			}
 		}
 
-		res.json({ 
-			sessionId: session.id, 
-			url: session.url, 
-			orderId: order?.id || null 
+		res.json({
+			sessionId: session.id,
+			url: session.url,
+			orderId: order?.id || null,
 		});
 	} catch (error) {
 		console.error('Checkout error:', error);
@@ -779,12 +834,12 @@ const createCheckout = async (req, res) => {
  */
 const createShopCheckout = async (req, res) => {
 	try {
-		const { 
-			resource_id, 
-			resource_price, 
-			success_url, 
-			cancel_url, 
-			mode = 'payment'
+		const {
+			resource_id,
+			resource_price,
+			success_url,
+			cancel_url,
+			mode = 'payment',
 		} = req.body;
 
 		if (!resource_id || !resource_price || !success_url || !cancel_url) {
@@ -798,8 +853,8 @@ const createShopCheckout = async (req, res) => {
 				name: `Resource #${resource_id}`,
 				metadata: {
 					resource_id: resource_id.toString(),
-					course_id: '99999' // Special shop identifier
-				}
+					course_id: '99999', // Special shop identifier
+				},
 			},
 			unit_amount: Math.round(resource_price * 100), // Convert to cents
 		};
@@ -808,17 +863,19 @@ const createShopCheckout = async (req, res) => {
 		const customer = await stripe.customers.create({
 			metadata: {
 				is_shop_customer: 'true',
-				resource_id: resource_id.toString()
-			}
+				resource_id: resource_id.toString(),
+			},
 		});
 
 		// Create checkout session with direct download redirect
 		const session = await stripe.checkout.sessions.create({
 			payment_method_types: ['card'],
-			line_items: [{
-				price_data: priceData,
-				quantity: 1,
-			}],
+			line_items: [
+				{
+					price_data: priceData,
+					quantity: 1,
+				},
+			],
 			mode: mode,
 			success_url: success_url,
 			cancel_url: cancel_url,
@@ -826,7 +883,7 @@ const createShopCheckout = async (req, res) => {
 			metadata: {
 				resource_id: resource_id.toString(),
 				course_id: '99999',
-				is_shop_purchase: 'true'
+				is_shop_purchase: 'true',
 			},
 		});
 
@@ -840,15 +897,14 @@ const createShopCheckout = async (req, res) => {
 			amountTotal: Math.round(resource_price * 100),
 			currency: 'usd',
 			paymentStatus: 'pending',
-			status: 'pending'
+			status: 'pending',
 		});
 
 		return res.status(200).json({
 			sessionId: session.id,
 			url: session.url,
-			orderId: null
+			orderId: null,
 		});
-
 	} catch (error) {
 		console.error('Shop checkout error:', error);
 		res.status(500).json({ error: 'Failed to create shop checkout session' });
@@ -862,39 +918,39 @@ const createShopCheckout = async (req, res) => {
 const shopDownload = async (req, res) => {
 	try {
 		const { sessionId } = req.params;
-		
+
 		// Verify payment was completed
 		const stripeOrderStore = new StripeOrderStore(req.app.locals.pool);
 		const order = await stripeOrderStore.findByCheckoutSessionId(sessionId);
-		
+
 		// Get the Stripe session to verify payment status directly
 		const session = await stripe.checkout.sessions.retrieve(sessionId);
-		
+
 		if (!order) {
 			return res.status(404).json({ error: 'Order not found' });
 		}
-		
+
 		// Check payment status from Stripe session (more reliable than DB which might not be updated yet)
 		if (session.payment_status !== 'paid') {
 			return res.status(404).json({ error: 'Payment not completed yet' });
 		}
-		
+
 		// Extract resource info from session metadata
 		const resourceId = session.metadata?.resource_id;
-		
+
 		if (!resourceId) {
 			return res.status(404).json({ error: 'Resource not found' });
 		}
-		
+
 		// Get resource from database
 		const { ResourceStore } = require('../models/resource');
 		const resourceStore = new ResourceStore(req.app.locals.pool);
 		const resource = await resourceStore.show(parseInt(resourceId));
-		
+
 		if (!resource) {
 			return res.status(404).json({ error: 'Resource not found' });
 		}
-		
+
 		// Generate PDF using puppeteer for proper HTML rendering
 		const browser = await puppeteer.launch({
 			headless: true,
@@ -906,15 +962,18 @@ const shopDownload = async (req, res) => {
 				'--no-first-run',
 				'--no-zygote',
 				'--single-process',
-				'--disable-gpu'
-			]
+				'--disable-gpu',
+			],
 		});
-		
+
 		try {
 			const page = await browser.newPage();
-			
+
 			// Create properly formatted HTML content
-			const content = resource.type === 'manual' ? resource.content : resource.content?.replace(/\n/g, '<br>');
+			const content =
+				resource.type === 'manual'
+					? resource.content
+					: resource.content?.replace(/\n/g, '<br>');
 			const htmlContent = `
 				<!DOCTYPE html>
 				<html>
@@ -927,12 +986,12 @@ const shopDownload = async (req, res) => {
 				</body>
 				</html>
 			`;
-			
+
 			// Set the HTML content
 			await page.setContent(htmlContent, {
-				waitUntil: 'networkidle0'
+				waitUntil: 'networkidle0',
 			});
-			
+
 			// Generate PDF with no additional margins or styling
 			const pdfBuffer = await page.pdf({
 				format: 'A4',
@@ -941,23 +1000,28 @@ const shopDownload = async (req, res) => {
 					top: '0mm',
 					right: '0mm',
 					bottom: '0mm',
-					left: '0mm'
-				}
+					left: '0mm',
+				},
 			});
-			
+
 			await browser.close();
-			
+
 			// Set proper headers for PDF download
 			res.setHeader('Content-Type', 'application/pdf');
-			res.setHeader('Content-Disposition', `attachment; filename="${resource.title.replace(/[^a-zA-Z0-9]/g, '-')}.pdf"`);
+			res.setHeader(
+				'Content-Disposition',
+				`attachment; filename="${resource.title.replace(
+					/[^a-zA-Z0-9]/g,
+					'-'
+				)}.pdf"`
+			);
 			res.setHeader('Content-Length', pdfBuffer.length);
-			
+
 			return res.send(pdfBuffer);
 		} catch (error) {
 			await browser.close();
 			throw error;
 		}
-		
 	} catch (error) {
 		console.error('Shop download error:', error);
 		res.status(500).json({ error: 'Failed to process download' });
@@ -971,39 +1035,39 @@ const shopDownload = async (req, res) => {
 const shopInfo = async (req, res) => {
 	try {
 		const { sessionId } = req.params;
-		
+
 		// Verify payment was completed
 		const stripeOrderStore = new StripeOrderStore(req.app.locals.pool);
 		const order = await stripeOrderStore.findByCheckoutSessionId(sessionId);
-		
+
 		// Get the Stripe session to verify payment status directly
 		const session = await stripe.checkout.sessions.retrieve(sessionId);
-		
+
 		if (!order) {
 			return res.status(404).json({ error: 'Order not found' });
 		}
-		
+
 		// Check payment status from Stripe session
 		if (session.payment_status !== 'paid') {
 			return res.status(404).json({ error: 'Payment not completed yet' });
 		}
-		
+
 		// Extract resource info from session metadata
 		const resourceId = session.metadata?.resource_id;
-		
+
 		if (!resourceId) {
 			return res.status(404).json({ error: 'Resource not found' });
 		}
-		
+
 		// Get resource from database
 		const { ResourceStore } = require('../models/resource');
 		const resourceStore = new ResourceStore(req.app.locals.pool);
 		const resource = await resourceStore.show(parseInt(resourceId));
-		
+
 		if (!resource) {
 			return res.status(404).json({ error: 'Resource not found' });
 		}
-		
+
 		// Return resource info as JSON
 		return res.json({
 			success: true,
@@ -1012,11 +1076,10 @@ const shopInfo = async (req, res) => {
 				title: resource.title,
 				author: resource.author || 'JingWu Foundation',
 				type: resource.type || 'Resource',
-				category: resource.category
+				category: resource.category,
 			},
-			session_id: sessionId
+			session_id: sessionId,
 		});
-		
 	} catch (error) {
 		console.error('Shop info error:', error);
 		res.status(500).json({ error: 'Failed to get resource info' });
@@ -1039,7 +1102,7 @@ const webhook = async (req, res) => {
 			console.error('Webhook signature verification failed:', err.message);
 			return res.status(400).send(`Webhook Error: ${err.message}`);
 		}
-		
+
 		// Handle the event
 		await handleStripeEvent(event, req.app.locals.pool);
 
@@ -1123,35 +1186,39 @@ const verifyPayment = async (req, res) => {
 
 		// Get session details from Stripe
 		const session = await stripe.checkout.sessions.retrieve(session_id);
-		
-		if (session.payment_status === 'paid' && session.metadata.user_id == userId) {
+
+		if (
+			session.payment_status === 'paid' &&
+			session.metadata.user_id == userId
+		) {
 			// Payment was successful, complete the order
 			const orderStore = new OrderStore(req.app.locals.pool);
-			
+
 			try {
 				const completedOrder = await orderStore.completeFromStripe(
 					session_id,
 					session.payment_intent
 				);
 
-				
-				return res.json({ 
-					success: true, 
+				return res.json({
+					success: true,
 					order_id: completedOrder.id,
 					enrolled: true,
-					resource_access: resource_id ? true : false
+					resource_access: resource_id ? true : false,
 				});
 			} catch (error) {
 				// Order might already be completed
-				return res.json({ 
-					success: true, 
+				return res.json({
+					success: true,
 					message: 'Payment already processed',
 					enrolled: true,
-					resource_access: resource_id ? true : false
+					resource_access: resource_id ? true : false,
 				});
 			}
 		} else {
-			return res.status(400).json({ error: 'Payment not completed or user mismatch' });
+			return res
+				.status(400)
+				.json({ error: 'Payment not completed or user mismatch' });
 		}
 	} catch (error) {
 		console.error('Payment verification error:', error);
@@ -1181,9 +1248,11 @@ async function handleStripeEvent(event, pool) {
 	if (event.type === 'checkout.session.completed') {
 		const { mode, payment_status } = stripeData;
 		isSubscription = mode === 'subscription';
-		
 
-		if ((mode === 'payment' || mode === 'subscription') && payment_status === 'paid') {
+		if (
+			(mode === 'payment' || mode === 'subscription') &&
+			payment_status === 'paid'
+		) {
 			// Handle one-time payment (course purchases or Q&A bookings)
 			const {
 				id: checkout_session_id,
@@ -1191,7 +1260,7 @@ async function handleStripeEvent(event, pool) {
 				amount_subtotal,
 				amount_total,
 				currency,
-				metadata
+				metadata,
 			} = stripeData;
 
 			// Save to Stripe orders table (skip for shop purchases - they're already created)
@@ -1222,8 +1291,11 @@ async function handleStripeEvent(event, pool) {
 					);
 
 					// Only trigger AI response if order was successfully completed AND payment is confirmed
-					if (metadata.appointment_type === 'written_guidance' && completedOrder && payment_status === 'paid') {
-						
+					if (
+						metadata.appointment_type === 'written_guidance' &&
+						completedOrder &&
+						payment_status === 'paid'
+					) {
 						// Don't await - run in background to avoid webhook timeout
 						// Pass minimal data to avoid holding webhook connections
 						setTimeout(() => {
@@ -1232,7 +1304,7 @@ async function handleStripeEvent(event, pool) {
 								metadata.notes,
 								metadata.course_id,
 								checkout_session_id // Pass session ID to prevent duplicates
-							).catch(error => {
+							).catch((error) => {
 								console.error('Background AI response failed:', error);
 							});
 						}, 100); // Small delay to ensure webhook completes first
@@ -1245,18 +1317,23 @@ async function handleStripeEvent(event, pool) {
 				// Webhook only handles payment/order completion
 			} else if (metadata?.is_shop_purchase === 'true') {
 				// Handle shop resource purchase - update existing stripe_orders record
-				console.log(`Shop purchase completed for resource ${metadata.resource_id}, session: ${checkout_session_id}`);
-				
+				console.log(
+					`Shop purchase completed for resource ID: ${metadata.resource_id}`
+				);
+
 				// Update the existing stripe_orders record with payment details
 				const stripeOrderStore = new StripeOrderStore(pool);
 				try {
 					await stripeOrderStore.updatePaymentStatus(checkout_session_id, {
 						paymentIntentId: payment_intent,
 						paymentStatus: 'paid',
-						status: 'completed'
+						status: 'completed',
 					});
 				} catch (error) {
-					console.error('Failed to update shop purchase payment status:', error);
+					console.error(
+						'Failed to update shop purchase payment status:',
+						error
+					);
 				}
 			} else {
 				// Complete the main order (course/resource enrollment)
@@ -1278,15 +1355,18 @@ async function handleStripeEvent(event, pool) {
 
 	if (isSubscription) {
 		await syncCustomerFromStripe(customerId, pool);
-		
+
 		// Handle subscription events
-		if ((event.type === 'checkout.session.completed' && stripeData.subscription) ||
-			event.type.startsWith('customer.subscription.')) {
+		if (
+			(event.type === 'checkout.session.completed' &&
+				stripeData.subscription) ||
+			event.type.startsWith('customer.subscription.')
+		) {
 			try {
 				// Get subscription ID based on event type
 				let subscriptionId;
 				let userId;
-				
+
 				if (event.type === 'checkout.session.completed') {
 					subscriptionId = stripeData.subscription;
 					userId = parseInt(stripeData.metadata.user_id);
@@ -1298,63 +1378,99 @@ async function handleStripeEvent(event, pool) {
 						[customerId]
 					);
 					if (customerQuery.rows.length === 0) {
-							return;
+						return;
 					}
 					userId = customerQuery.rows[0].user_id;
-					}
-				
+				}
+
 				// Get the subscription details from Stripe
-				const subscription = await stripe.subscriptions.retrieve(subscriptionId);
-				
+				const subscription = await stripe.subscriptions.retrieve(
+					subscriptionId
+				);
+
 				// Determine subscription type and details
 				let subscriptionType = 'general';
 				let resourceId = null;
 				let metadata = {};
-				
-				if (event.type === 'checkout.session.completed' && stripeData.metadata?.is_ai_sifu_subscription === 'true') {
+
+				if (
+					event.type === 'checkout.session.completed' &&
+					stripeData.metadata?.is_ai_sifu_subscription === 'true'
+				) {
 					subscriptionType = 'ai_sifu';
-					metadata = { 
+					metadata = {
 						description: 'AI Sifu Monthly Subscription',
-						features: ['12 questions per month', 'Personal AI martial arts guide']
+						features: [
+							'12 questions per month',
+							'Personal AI martial arts guide',
+						],
 					};
-				} else if (event.type === 'checkout.session.completed' && stripeData.metadata?.is_qa_booking === 'true' && stripeData.metadata?.appointment_type === 'intensive_mentorship') {
+				} else if (
+					event.type === 'checkout.session.completed' &&
+					stripeData.metadata?.is_qa_booking === 'true' &&
+					stripeData.metadata?.appointment_type === 'intensive_mentorship'
+				) {
 					subscriptionType = 'intensive_mentorship';
 					metadata = {
 						description: 'Intensive Mentorship Monthly Subscription',
-						features: ['Weekly 20-min calls', '3 questions per week', 'Advanced training', 'Dedicated instructor relationship'],
+						features: [
+							'Weekly 20-min calls',
+							'3 questions per week',
+							'Advanced training',
+							'Dedicated instructor relationship',
+						],
 						appointment_type: stripeData.metadata.appointment_type,
 						full_name: stripeData.metadata.full_name,
 						email: stripeData.metadata.email,
 						phone_number: stripeData.metadata.phone_number,
 						start_time: stripeData.metadata.start_time,
 						end_time: stripeData.metadata.end_time,
-						notes: stripeData.metadata.notes
+						notes: stripeData.metadata.notes,
 					};
-					
-				} else if (event.type === 'checkout.session.completed' && stripeData.metadata?.course_id) {
+				} else if (
+					event.type === 'checkout.session.completed' &&
+					stripeData.metadata?.course_id
+				) {
 					subscriptionType = 'course';
 					resourceId = parseInt(stripeData.metadata.course_id);
 				} else if (event.type.startsWith('customer.subscription.')) {
 					// For subscription events, determine type from product name or metadata
-					const productName = subscription.items.data[0]?.price?.product?.name || 
-					                   subscription.items.data[0]?.price?.nickname || '';
-					const productMetadata = subscription.items.data[0]?.price?.product?.metadata || {};
-					
-					if (productName.includes('AI Sifu') || productName.includes('ai_sifu')) {
+					const productName =
+						subscription.items.data[0]?.price?.product?.name ||
+						subscription.items.data[0]?.price?.nickname ||
+						'';
+					const productMetadata =
+						subscription.items.data[0]?.price?.product?.metadata || {};
+
+					if (
+						productName.includes('AI Sifu') ||
+						productName.includes('ai_sifu')
+					) {
 						subscriptionType = 'ai_sifu';
-						metadata = { 
+						metadata = {
 							description: 'AI Sifu Monthly Subscription',
-							features: ['12 questions per month', 'Personal AI martial arts guide']
+							features: [
+								'12 questions per month',
+								'Personal AI martial arts guide',
+							],
 						};
-					} else if (productName.includes('Intensive Mentorship') || productMetadata.appointment_type === 'intensive_mentorship') {
+					} else if (
+						productName.includes('Intensive Mentorship') ||
+						productMetadata.appointment_type === 'intensive_mentorship'
+					) {
 						subscriptionType = 'intensive_mentorship';
 						metadata = {
 							description: 'Intensive Mentorship Monthly Subscription',
-							features: ['Weekly 20-min calls', '3 questions per week', 'Advanced training', 'Dedicated instructor relationship']
+							features: [
+								'Weekly 20-min calls',
+								'3 questions per week',
+								'Advanced training',
+								'Dedicated instructor relationship',
+							],
 						};
 					}
 				}
-				
+
 				// Create subscription record in general subscriptions table
 				const subscriptionSql = `
 					INSERT INTO subscriptions (
@@ -1371,20 +1487,27 @@ async function handleStripeEvent(event, pool) {
 						cancel_at_period_end = EXCLUDED.cancel_at_period_end,
 						updated_at = CURRENT_TIMESTAMP
 				`;
-				
+
 				// Calculate price in cents from subscription
 				const priceCents = subscription.items.data[0]?.price?.unit_amount || 0;
-				
+
 				// Skip creating 'general' subscriptions from customer.subscription.created events
 				// These are handled better by checkout.session.completed events with proper metadata
-				if (subscriptionType === 'general' && event.type === 'customer.subscription.created') {
-						return;
+				if (
+					subscriptionType === 'general' &&
+					event.type === 'customer.subscription.created'
+				) {
+					return;
 				}
-				
+
 				// Validate and convert timestamps
-				const startDate = subscription.current_period_start ? new Date(subscription.current_period_start * 1000) : new Date();
-				const endDate = subscription.current_period_end ? new Date(subscription.current_period_end * 1000) : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // Default to 30 days from now
-				
+				const startDate = subscription.current_period_start
+					? new Date(subscription.current_period_start * 1000)
+					: new Date();
+				const endDate = subscription.current_period_end
+					? new Date(subscription.current_period_end * 1000)
+					: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // Default to 30 days from now
+
 				await pool.query(subscriptionSql, [
 					userId,
 					subscription.id,
@@ -1395,9 +1518,8 @@ async function handleStripeEvent(event, pool) {
 					endDate,
 					subscription.cancel_at_period_end,
 					priceCents,
-					JSON.stringify(metadata)
+					JSON.stringify(metadata),
 				]);
-				
 			} catch (error) {
 				console.error('Error activating subscription:', error);
 			}
@@ -1405,8 +1527,11 @@ async function handleStripeEvent(event, pool) {
 	}
 
 	// Handle subscription deletion/cancellation events
-	if (event.type === 'customer.subscription.deleted' || 
-		(event.type === 'customer.subscription.updated' && stripeData.status === 'canceled')) {
+	if (
+		event.type === 'customer.subscription.deleted' ||
+		(event.type === 'customer.subscription.updated' &&
+			stripeData.status === 'canceled')
+	) {
 		try {
 			const subscriptionId = stripeData.id;
 
@@ -1420,7 +1545,6 @@ async function handleStripeEvent(event, pool) {
 				'UPDATE stripe_subscriptions SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE subscription_id = $2',
 				['canceled', subscriptionId]
 			);
-
 		} catch (error) {
 			console.error('Error updating cancelled subscription:', error);
 		}
@@ -1443,7 +1567,7 @@ async function syncCustomerFromStripe(customerId, pool) {
 		});
 
 		if (subscriptions.data.length === 0) {
-				await subscriptionStore.upsert({
+			await subscriptionStore.upsert({
 				customerId,
 				subscriptionId: null,
 				priceId: null,
@@ -1458,10 +1582,10 @@ async function syncCustomerFromStripe(customerId, pool) {
 		}
 
 		let subscription = subscriptions.data[0];
-		
+
 		// Fetch full subscription details to ensure we have period dates
 		subscription = await stripe.subscriptions.retrieve(subscription.id, {
-			expand: ['default_payment_method']
+			expand: ['default_payment_method'],
 		});
 		await subscriptionStore.upsert({
 			customerId,
@@ -1476,7 +1600,6 @@ async function syncCustomerFromStripe(customerId, pool) {
 				subscription.default_payment_method?.card?.last4 || null,
 			status: subscription.status,
 		});
-
 	} catch (error) {
 		console.error('Failed to sync subscription for customer');
 		throw error;
