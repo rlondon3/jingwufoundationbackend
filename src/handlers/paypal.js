@@ -494,11 +494,12 @@ const createCheckout = async (req, res) => {
 			itemPrice = qa_consultation_price;
 		}
 
-		// Determine return URL based on purchase type
-		let returnUrl;
+		// Determine return URL and cancel URL based on purchase type
+		let returnUrl, cancelUrl;
 		if (resource_id) {
 			// For in-app resource purchases, go to payment success page first
 			returnUrl = `${process.env.FRONTEND_URL}/payment/success?paypal=true&resource_id=${resource_id}`;
+			cancelUrl = `${process.env.FRONTEND_URL}/app/resources`;
 		} else if (qa_consultation) {
 			// For Q&A consultations, include consultation type
 			returnUrl = `${
@@ -506,14 +507,19 @@ const createCheckout = async (req, res) => {
 			}/payment/success?qa_consultation=${qa_consultation_type}&paypal=true${
 				course_id ? `&course_id=${course_id}` : ''
 			}`;
+			cancelUrl = `${process.env.FRONTEND_URL}/payment/failed?qa_consultation=${qa_consultation_type}&reason=cancelled&paypal=true${
+				course_id ? `&course_id=${course_id}` : ''
+			}`;
 		} else if (ai_sifu_subscription) {
 			// For AI Sifu subscriptions
 			returnUrl = `${process.env.FRONTEND_URL}/payment/success?ai_sifu=true&paypal=true`;
+			cancelUrl = `${process.env.FRONTEND_URL}/payment/failed?reason=cancelled&paypal=true`;
 		} else {
 			// For course purchases
 			returnUrl = `${process.env.FRONTEND_URL}/payment/success?paypal=true${
 				course_id ? `&course_id=${course_id}` : ''
 			}`;
+			cancelUrl = `${process.env.FRONTEND_URL}/payment/failed?reason=cancelled&paypal=true`;
 		}
 
 		// Prepare order request
@@ -541,7 +547,7 @@ const createCheckout = async (req, res) => {
 			],
 			application_context: {
 				return_url: returnUrl,
-				cancel_url: `${process.env.FRONTEND_URL}/payment/failed?reason=cancelled&paypal=true`,
+				cancel_url: cancelUrl,
 				brand_name: 'Jing Wu Foundation',
 				user_action: 'CONTINUE',
 				shipping_preference: 'NO_SHIPPING',
