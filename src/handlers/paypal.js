@@ -16,7 +16,9 @@ const { MessageStore } = require('../models/message');
 const OptimizedNeigongAgent = require('../utilis/optimizedAgent');
 
 // PayPal API configuration
-const PAYPAL_BASE_URL = 'https://api-m.paypal.com'; // Production PayPal API
+const PAYPAL_BASE_URL = process.env.PAYPAL_ENVIRONMENT === 'production' 
+  ? 'https://api-m.paypal.com' 
+  : 'https://api-m.sandbox.paypal.com';
 
 // Get PayPal access token
 async function getPayPalAccessToken() {
