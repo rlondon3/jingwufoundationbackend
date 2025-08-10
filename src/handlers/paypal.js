@@ -38,7 +38,7 @@ async function getPayPalAccessToken() {
 	const data = await response.json();
 
 	if (!response.ok) {
-		console.error('❌ Failed to get PayPal access token:', data);
+		console.error('Failed to get PayPal access token:', data);
 		throw new Error(
 			`PayPal authentication failed: ${data.error_description || data.error}`
 		);
@@ -295,17 +295,11 @@ const createQACheckout = async (req, res) => {
 					},
 					description: description,
 					custom_id: JSON.stringify({
-						appointment_type,
-						full_name,
-						email,
-						phone_number: phone_number || '',
-						start_time,
-						end_time,
-						notes: notes || '',
-						user_id: user_id?.toString() || '',
-						course_id: course_id?.toString() || '',
-						is_qa_booking: 'true',
-						is_subscription: is_subscription ? 'true' : 'false',
+						type: 'qa',
+						apt: appointment_type,
+						uid: user_id?.toString() || '',
+						cid: course_id?.toString() || '',
+						sub: is_subscription ? '1' : '0',
 					}),
 				},
 			],
@@ -314,7 +308,7 @@ const createQACheckout = async (req, res) => {
 					process.env.FRONTEND_URL
 				}/payment/success?qa_consultation=${appointment_type}&paypal=true${
 					course_id ? `&course_id=${course_id}` : ''
-				}`,
+				}&session_name=${encodeURIComponent(session_name)}&price=${price}`,
 				cancel_url: `${
 					process.env.FRONTEND_URL
 				}/payment/failed?qa_consultation=${appointment_type}&reason=cancelled&paypal=true${
@@ -338,18 +332,38 @@ const createQACheckout = async (req, res) => {
 		});
 
 		if (!response.ok) {
-			throw new Error('Failed to create PayPal order');
+			const errorData = await response.json().catch(() => null);
+			console.error('PayPal Q&A Checkout API Error:', {
+				status: response.status,
+				statusText: response.statusText,
+				errorData,
+				orderRequest: JSON.stringify(orderRequest, null, 2)
+			});
+			throw new Error(`Failed to create PayPal Q&A order: ${response.status} - ${JSON.stringify(errorData)}`);
 		}
 
 		const order = await response.json();
 
-		// Create consultation order for tracking
+		// Create consultation order for tracking with booking data
 		let internalOrder = null;
 		if (user_id) {
 			const { OrderStore } = require('../models/order');
 			const orderStore = new OrderStore(req.app.locals.pool);
 
 			try {
+				
+				// Store booking data in the order notes for retrieval after payment
+				const bookingDataJson = JSON.stringify({
+					appointment_type,
+					full_name,
+					email,
+					phone_number: phone_number || null,
+					start_time,
+					end_time,
+					notes: notes || null,
+					user_id: user_id,
+				});
+				
 				internalOrder = await orderStore.createConsultationOrder({
 					user_id: user_id,
 					course_id: course_id,
@@ -358,11 +372,14 @@ const createQACheckout = async (req, res) => {
 					order_status: 'pending',
 					payment_method: 'paypal',
 					paypal_order_id: order.id,
-					notes: `Q&A Consultation: ${appointment_type}`,
+					notes: bookingDataJson,
 				});
 			} catch (orderError) {
 				console.error('Failed to create consultation order:', orderError);
+				throw orderError;
 			}
+		} else {
+			console.error('No user_id provided for consultation order creation');
 		}
 
 		// Find approval URL
@@ -591,12 +608,6 @@ const createCheckout = async (req, res) => {
 				});
 			} else if (resource_id) {
 				try {
-					console.log('🔧 Creating PayPal add-on order:', {
-						user_id: userId,
-						course_id: course_id,
-						resource_id: resource_id,
-						paypal_order_id: order.id,
-					});
 					internalOrder = await orderStore.createAddOnOrder({
 						user_id: userId,
 						course_id: course_id,
@@ -605,9 +616,8 @@ const createCheckout = async (req, res) => {
 						payment_method: 'paypal',
 						paypal_order_id: order.id,
 					});
-					console.log('✅ PayPal add-on order created:', internalOrder.id);
 				} catch (orderError) {
-					console.error('❌ Failed to create PayPal add-on order:', orderError);
+					console.error('Failed to create PayPal add-on order:', orderError);
 					throw orderError;
 				}
 			} else {
@@ -632,8 +642,8 @@ const createCheckout = async (req, res) => {
 			internalOrderId: internalOrder?.id || null,
 		});
 	} catch (error) {
-		console.error('❌ PayPal Checkout error:', error.message);
-		console.error('❌ Full error stack:', error.stack);
+		console.error('PayPal Checkout error:', error.message);
+		console.error('Full error stack:', error.stack);
 		res.status(500).json({ error: 'Failed to create checkout session' });
 	}
 };
@@ -721,8 +731,8 @@ const createShopCheckout = async (req, res) => {
 			internalOrderId: null,
 		});
 	} catch (error) {
-		console.error('❌ PayPal Shop checkout error:', error);
-		console.error('❌ Error stack:', error.stack);
+		console.error('PayPal Shop checkout error:', error);
+		console.error('Error stack:', error.stack);
 		res.status(500).json({ error: 'Failed to create shop checkout session' });
 	}
 };
@@ -972,39 +982,96 @@ const captureOrder = async (req, res) => {
 	try {
 		const { orderId } = req.params;
 
-		// Capture the order
+		// Get order details first to check if it needs capture or authorization handling
 		const accessToken = await getPayPalAccessToken();
-		const response = await fetch(
-			`${PAYPAL_BASE_URL}/v2/checkout/orders/${orderId}/capture`,
+		const orderResponse = await fetch(
+			`${PAYPAL_BASE_URL}/v2/checkout/orders/${orderId}`,
 			{
-				method: 'POST',
 				headers: {
-					'Content-Type': 'application/json',
 					Authorization: `Bearer ${accessToken}`,
 				},
 			}
 		);
 
-		if (!response.ok) {
-			throw new Error('Failed to capture PayPal order');
+		if (!orderResponse.ok) {
+			const errorData = await orderResponse.json().catch(() => null);
+			console.error('Failed to get PayPal order details:', errorData);
+			throw new Error('Failed to get order details');
 		}
 
-		const capture = await response.json();
+		const orderDetails = await orderResponse.json();
+		console.log('PayPal Order Details:', {
+			id: orderDetails.id,
+			intent: orderDetails.intent,
+			status: orderDetails.status
+		});
 
-		// Handle the captured order
+		// Handle based on order intent
+		let response;
+		if (orderDetails.intent === 'AUTHORIZE') {
+			// For AUTHORIZE intent (subscriptions), use authorize endpoint
+			response = await fetch(
+				`${PAYPAL_BASE_URL}/v2/checkout/orders/${orderId}/authorize`,
+				{
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+						Authorization: `Bearer ${accessToken}`,
+					},
+				}
+			);
+		} else {
+			// For CAPTURE intent, use capture endpoint
+			response = await fetch(
+				`${PAYPAL_BASE_URL}/v2/checkout/orders/${orderId}/capture`,
+				{
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+						Authorization: `Bearer ${accessToken}`,
+					},
+				}
+			);
+		}
+
+		if (!response.ok) {
+			const errorData = await response.json().catch(() => null);
+			console.error('PayPal Capture API Error:', {
+				status: response.status,
+				statusText: response.statusText,
+				orderId,
+				errorData
+			});
+			throw new Error(`Failed to capture PayPal order: ${response.status} - ${JSON.stringify(errorData)}`);
+		}
+
+		const result = await response.json();
+
+		// Handle the completed order (either captured or authorized)
 		await handlePayPalEvent(
 			{
 				event_type: 'CHECKOUT.ORDER.COMPLETED',
-				resource: capture,
+				resource: result,
 			},
 			req.app.locals.pool
 		);
 
-		res.json({
-			success: true,
-			captureId: capture.purchase_units[0]?.payments?.captures[0]?.id,
-			status: capture.status,
-		});
+		// Return appropriate response based on intent
+		if (orderDetails.intent === 'AUTHORIZE') {
+			res.json({
+				success: true,
+				authorizationId: result.purchase_units[0]?.payments?.authorizations[0]?.id,
+				status: result.status,
+				intent: 'AUTHORIZE'
+			});
+		} else {
+			res.json({
+				success: true,
+				captureId: result.purchase_units[0]?.payments?.captures[0]?.id,
+				status: result.status,
+				intent: 'CAPTURE'
+			});
+		}
 	} catch (error) {
 		console.error('PayPal Capture error:', error);
 		res.status(500).json({ error: 'Failed to capture order' });
@@ -1158,7 +1225,9 @@ async function handlePayPalEvent(event, pool) {
 		const orderId = resource.id;
 		const payerId = resource.payer?.payer_id;
 		const captureId =
-			resource.purchase_units?.[0]?.payments?.captures?.[0]?.id || resource.id;
+			resource.purchase_units?.[0]?.payments?.captures?.[0]?.id || 
+			resource.purchase_units?.[0]?.payments?.authorizations?.[0]?.id ||
+			resource.id;
 		const amountValue = parseFloat(
 			resource.purchase_units?.[0]?.amount?.value ||
 				resource.amount?.value ||
@@ -1170,22 +1239,10 @@ async function handlePayPalEvent(event, pool) {
 			'USD';
 		const customId =
 			resource.purchase_units?.[0]?.payments?.captures?.[0]?.custom_id ||
+			resource.purchase_units?.[0]?.payments?.authorizations?.[0]?.custom_id ||
 			resource.purchase_units?.[0]?.custom_id ||
 			resource.custom_id;
 
-		// console.log('🔍 PAYPAL EVENT DEBUG:', {
-		// 	eventType,
-		// 	orderId,
-		// 	captureId,
-		// 	customId,
-		// 	hasCustomId: !!customId,
-		// 	resource_structure: {
-		// 		has_purchase_units: !!resource.purchase_units,
-		// 		purchase_units_length: resource.purchase_units?.length,
-		// 		has_captures: !!resource.purchase_units?.[0]?.payments?.captures,
-		// 		captures_length: resource.purchase_units?.[0]?.payments?.captures?.length
-		// 	}
-		// });
 
 		if (!customId) {
 			console.error('No custom_id found in PayPal event');
@@ -1226,15 +1283,15 @@ async function handlePayPalEvent(event, pool) {
 		}
 
 		// Create customer record if needed
-		if (payerId && metadata.user_id) {
+		if (payerId && metadata.uid) {
 			const customerStore = new PayPalCustomerStore(pool);
 			try {
 				let customer = await customerStore.findByUserId(
-					parseInt(metadata.user_id)
+					parseInt(metadata.uid)
 				);
 				if (!customer) {
 					await customerStore.create({
-						userId: parseInt(metadata.user_id),
+						userId: parseInt(metadata.uid),
 						payerId: payerId,
 						email: resource.payer?.email_address || '',
 					});
@@ -1248,7 +1305,7 @@ async function handlePayPalEvent(event, pool) {
 		}
 
 		// Handle Q&A consultation
-		if (metadata.is_qa_booking === 'true') {
+		if (metadata.type === 'qa') {
 			const { OrderStore } = require('../models/order');
 			const orderStore = new OrderStore(pool);
 
@@ -1258,21 +1315,75 @@ async function handlePayPalEvent(event, pool) {
 					captureId
 				);
 
-				// Trigger AI response for written guidance
-				if (
-					metadata.appointment_type === 'written_guidance' &&
-					completedOrder
-				) {
-					setTimeout(() => {
-						handleWrittenGuidanceResponse(
-							parseInt(metadata.user_id),
-							metadata.notes,
-							metadata.course_id,
-							orderId
-						).catch((error) => {
-							console.error('Background AI response failed:', error);
-						});
-					}, 100);
+				// Create booking after successful payment - retrieve data from internal order
+				try {
+					const { BookingsStore } = require('../models/booking');
+					const bookingsStore = new BookingsStore(pool);
+					const { OrderStore } = require('../models/order');
+					const orderStore = new OrderStore(pool);
+					
+					// Find the internal order by PayPal order ID to get booking data
+					const internalOrder = await orderStore.getByPayPalOrder(orderId);
+					
+					if (internalOrder && internalOrder.notes) {
+						
+						// Try to parse the booking data from order notes
+						let bookingData;
+						try {
+							bookingData = JSON.parse(internalOrder.notes);
+						} catch (parseError) {
+							console.error('Failed to parse booking data from order notes:', parseError);
+							console.error('Raw notes content:', internalOrder.notes);
+							throw new Error(`Invalid booking data in order notes: ${parseError.message}`);
+						}
+						
+						// Check if booking already exists for this PayPal order to prevent duplicates
+						const existingBookings = await bookingsStore.getBookingsByEmail(bookingData.email);
+						
+						// For intensive mentorship, also check by user_id and appointment_type since dates might be unreliable
+						let duplicateBooking;
+						if (metadata.apt === 'intensive_mentorship') {
+							duplicateBooking = existingBookings.find(booking => 
+								booking.appointment_type === metadata.apt &&
+								booking.user_id === bookingData.user_id &&
+								booking.status !== 'cancelled'
+							);
+						} else {
+							duplicateBooking = existingBookings.find(booking => 
+								booking.appointment_type === metadata.apt &&
+								booking.start_time === bookingData.start_time &&
+								booking.end_time === bookingData.end_time &&
+								booking.status !== 'cancelled'
+							);
+						}
+						
+						if (duplicateBooking) {
+							return; // Skip creating duplicate booking
+						}
+						
+						// Create the booking
+						const createdBooking = await bookingsStore.createBooking(bookingData);
+						
+						// Trigger AI response for written guidance
+						if (metadata.apt === 'written_guidance' && createdBooking) {
+							setTimeout(() => {
+								handleWrittenGuidanceResponse(
+									parseInt(metadata.uid),
+									createdBooking.notes,
+									metadata.cid,
+									orderId
+								).catch((error) => {
+									console.error('Background AI response failed:', error);
+								});
+							}, 100);
+						}
+					} else {
+						console.error('CRITICAL ERROR: No internal order found for PayPal order:', orderId);
+						console.error('This should NEVER happen - internal order should always exist');
+						throw new Error(`Internal order not found for PayPal order: ${orderId}`);
+					}
+				} catch (error) {
+					console.error('Failed to create booking after payment:', error);
 				}
 			} catch (error) {
 				console.error('Failed to complete consultation order from PayPal');
@@ -1302,7 +1413,7 @@ async function handlePayPalEvent(event, pool) {
 		// Handle subscription creation for AI Sifu or intensive mentorship
 		if (
 			metadata.is_ai_sifu_subscription === 'true' ||
-			metadata.appointment_type === 'intensive_mentorship'
+			metadata.apt === 'intensive_mentorship'
 		) {
 			try {
 				let subscriptionType =
@@ -1352,10 +1463,10 @@ async function handlePayPalEvent(event, pool) {
 				const priceCents = Math.round(amountValue * 100);
 
 				await pool.query(subscriptionSql, [
-					parseInt(metadata.user_id),
+					parseInt(metadata.uid),
 					orderId,
 					subscriptionType,
-					metadata.course_id ? parseInt(metadata.course_id) : null,
+					metadata.cid ? parseInt(metadata.cid) : null,
 					'active',
 					startDate,
 					endDate,

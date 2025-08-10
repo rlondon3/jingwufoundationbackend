@@ -272,9 +272,9 @@ class OrderStore {
 			// They are service-based add-ons, not resource-based
 			const sql = `
         INSERT INTO orders (user_id, course_id, resource_id, course_price, add_on_price,
-                           order_status, payment_method, stripe_checkout_session_id, notes,
+                           order_status, payment_method, stripe_checkout_session_id, paypal_order_id, notes,
                            is_add_on, item_name)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *
       `;
 
 			const res = await client.query(sql, [
@@ -286,6 +286,7 @@ class OrderStore {
 				order.order_status || 'pending',
 				order.payment_method || 'stripe',
 				order.stripe_checkout_session_id || null,
+				order.paypal_order_id || null,
 				order.notes || null,
 				true, // is_add_on = true for consultation orders
 				order.item_name, // consultation type name
@@ -404,12 +405,6 @@ class OrderStore {
 			await client.query('BEGIN');
 
 			// Update order status
-			console.log('🔍 Looking for order with PayPal order ID:', paypalOrderId);
-			
-			// First check what orders exist for debugging
-			const debugSql = `SELECT id, paypal_order_id, resource_id, user_id, order_status FROM orders WHERE paypal_order_id IS NOT NULL ORDER BY created_at DESC LIMIT 5`;
-			const debugRes = await client.query(debugSql);
-			console.log('🔍 Recent orders with PayPal IDs:', debugRes.rows);
 			
 			const orderSql = `
         UPDATE orders SET 
@@ -417,7 +412,10 @@ class OrderStore {
           paypal_capture_id = COALESCE($2, paypal_capture_id),
           completed_at = CURRENT_TIMESTAMP,
           updated_at = CURRENT_TIMESTAMP,
-          notes = 'Payment completed via PayPal'
+          notes = CASE 
+            WHEN notes IS NULL OR notes = '' THEN 'Payment completed via PayPal'
+            ELSE notes 
+          END
         WHERE paypal_order_id = $1 RETURNING *
       `;
 			const orderRes = await client.query(orderSql, [
@@ -425,7 +423,6 @@ class OrderStore {
 				paypalCaptureId,
 			]);
 
-			console.log('🔍 Query result rows found:', orderRes.rows.length);
 			if (orderRes.rows.length === 0) {
 				throw new Error('Order not found for PayPal order');
 			}
