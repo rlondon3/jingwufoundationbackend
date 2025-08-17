@@ -29,6 +29,7 @@ const guided_feedback_route = require('./handlers/guidedFeedback');
 const subscriptions_route = require('./handlers/subscriptions');
 const coursePreviews_route = require('./handlers/coursePreviews');
 const backup_routes = require('./handlers/backupRoutes');
+const { coupon_route } = require('./handlers/coupons');
 const { checkAndProcessContent } = require('../scripts/processContentChunks');
 const { checkAndImportPDFs } = require('../scripts/addPDFResources');
 
@@ -176,6 +177,7 @@ guided_feedback_route(app);
 subscriptions_route(app);
 coursePreviews_route(app);
 backup_routes(app);
+coupon_route(app);
 
 // Error handling for unhandled promise rejections
 process.on('unhandledRejection', (reason, promise) => {

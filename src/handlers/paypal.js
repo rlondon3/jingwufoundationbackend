@@ -603,6 +603,9 @@ const createCheckout = async (req, res) => {
 		const {
 			course_id,
 			course_price,
+			original_price,
+			coupon_code,
+			coupon_applied,
 			resource_id,
 			resource_price,
 			ai_sifu_subscription,
@@ -615,9 +618,17 @@ const createCheckout = async (req, res) => {
 		} = req.body;
 		const userId = req.user.id;
 
+		console.log('Backend received PayPal checkout data:', {
+			course_price,
+			course_id
+		});
+
 		if (!userId) {
 			return res.status(400).json({ error: 'User ID not found in token' });
 		}
+
+		// Frontend handles all coupon logic, just use the provided price
+		let finalPrice = course_price || resource_price || ai_sifu_price || qa_consultation_price;
 
 		// Validate required parameters
 		if (
@@ -650,7 +661,7 @@ const createCheckout = async (req, res) => {
 			}
 			itemName = courseName;
 			itemDescription = `Access to ${courseName} course content`;
-			itemPrice = course_price;
+			itemPrice = finalPrice;
 		} else if (resource_price) {
 			let resourceName = `Resource ${resource_id}`;
 			let resourceType = 'resource';
@@ -723,11 +734,26 @@ const createCheckout = async (req, res) => {
 			returnUrl = `${process.env.FRONTEND_URL}/payment/success?ai_sifu=true&paypal=true`;
 			cancelUrl = `${process.env.FRONTEND_URL}/payment/failed?reason=cancelled&paypal=true`;
 		} else {
-			// For course purchases
+			// For course purchases - check if it's a series
+			let isSeries = false;
+			if (course_id) {
+				try {
+					const courseQuery = await req.app.locals.pool.query(
+						'SELECT is_series FROM courses WHERE id = $1',
+						[course_id]
+					);
+					if (courseQuery.rows.length > 0) {
+						isSeries = courseQuery.rows[0].is_series;
+					}
+				} catch (error) {
+					console.error('Error checking if course is series:', error);
+				}
+			}
+			
 			returnUrl = `${process.env.FRONTEND_URL}/payment/success?paypal=true${
 				course_id ? `&course_id=${course_id}` : ''
-			}`;
-			cancelUrl = `${process.env.FRONTEND_URL}/payment/failed?reason=cancelled&paypal=true`;
+			}${isSeries ? '&series=true' : ''}`;
+			cancelUrl = `${process.env.FRONTEND_URL}/payment/failed?reason=cancelled&paypal=true${isSeries ? '&series=true' : ''}`;
 		}
 
 		// Prepare order request
