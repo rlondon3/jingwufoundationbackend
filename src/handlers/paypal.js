@@ -224,6 +224,203 @@ The Jing Wu Method Team${orderRef}
  */
 
 /**
+ * Setup PayPal subscription plan (run once to create the plan)
+ * POST /paypal/setup-subscription-plan
+ */
+const setupSubscriptionPlan = async (req, res) => {
+	try {
+		const accessToken = await getPayPalAccessToken();
+		
+		// First create the product
+		const productRequest = {
+			name: 'Intensive Mentorship Subscription',
+			description: 'Monthly subscription for intensive mentorship program with weekly calls and advanced training',
+			type: 'SERVICE',
+			category: 'SOFTWARE'
+		};
+		
+		const productResponse = await fetch(`${PAYPAL_BASE_URL}/v1/catalogs/products`, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Authorization: `Bearer ${accessToken}`,
+			},
+			body: JSON.stringify(productRequest),
+		});
+		
+		if (!productResponse.ok) {
+			const errorData = await productResponse.json();
+			return res.status(500).json({ 
+				error: 'Failed to create subscription product',
+				details: errorData 
+			});
+		}
+		
+		const product = await productResponse.json();
+		
+		// Then create the plan
+		const planRequest = {
+			product_id: product.id,
+			name: 'Intensive Mentorship Monthly Plan',
+			description: 'Monthly subscription for intensive mentorship program - $30/month',
+			status: 'ACTIVE',
+			billing_cycles: [{
+				frequency: {
+					interval_unit: 'MONTH',
+					interval_count: 1
+				},
+				tenure_type: 'REGULAR',
+				sequence: 1,
+				total_cycles: 0, // 0 = infinite billing cycles
+				pricing_scheme: {
+					fixed_price: {
+						value: '100.00',
+						currency_code: 'USD'
+					}
+				}
+			}],
+			payment_preferences: {
+				auto_bill_outstanding: true,
+				setup_fee: {
+					value: '100.00',
+					currency_code: 'USD'
+				},
+				setup_fee_failure_action: 'CONTINUE',
+				payment_failure_threshold: 3
+			}
+		};
+		
+		const planResponse = await fetch(`${PAYPAL_BASE_URL}/v1/billing/plans`, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Authorization: `Bearer ${accessToken}`,
+			},
+			body: JSON.stringify(planRequest),
+		});
+		
+		if (!planResponse.ok) {
+			const errorData = await planResponse.json();
+			return res.status(500).json({ 
+				error: 'Failed to create subscription plan',
+				details: errorData 
+			});
+		}
+		
+		const plan = await planResponse.json();
+		
+		res.json({
+			success: true,
+			product_id: product.id,
+			plan_id: plan.id,
+			message: `Set PAYPAL_INTENSIVE_MENTORSHIP_PLAN_ID=${plan.id} in your environment variables`
+		});
+		
+	} catch (error) {
+		console.error('PayPal subscription plan setup error:', error);
+		res.status(500).json({ error: 'Failed to setup subscription plan' });
+	}
+};
+
+/**
+ * Create PayPal Subscription for Intensive Mentorship
+ * POST /paypal/create-subscription
+ */
+const createSubscription = async (req, res) => {
+	try {
+		const { 
+			full_name, 
+			email, 
+			phone_number, 
+			start_time, 
+			end_time, 
+			notes, 
+			user_id, 
+			course_id 
+		} = req.body;
+
+		if (!full_name || !email || !user_id) {
+			return res.status(400).json({ 
+				error: 'Missing required fields: full_name, email, user_id' 
+			});
+		}
+
+		const accessToken = await getPayPalAccessToken();
+		
+		// Create compact metadata for custom_id (PayPal limit: 127 chars)
+		const compactMetadata = JSON.stringify({
+			t: 'ims', // type: intensive_mentorship_subscription
+			u: user_id.toString(),
+			c: course_id?.toString() || '0'
+		});
+
+		// Create subscription request
+		const subscriptionRequest = {
+			plan_id: process.env.PAYPAL_INTENSIVE_MENTORSHIP_PLAN_ID,
+			start_time: new Date(Date.now() + 5 * 60 * 1000).toISOString(), // Start in 5 minutes (updated)
+			subscriber: {
+				name: {
+					given_name: full_name.split(' ')[0],
+					surname: full_name.split(' ').slice(1).join(' ') || 'User'
+				},
+				email_address: email
+			},
+			application_context: {
+				brand_name: 'Jing Wu Foundation',
+				locale: 'en-US',
+				shipping_preference: 'NO_SHIPPING',
+				user_action: 'SUBSCRIBE_NOW',
+				payment_method: {
+					payer_selected: 'PAYPAL',
+					payee_preferred: 'IMMEDIATE_PAYMENT_REQUIRED'
+				},
+				return_url: `${process.env.FRONTEND_URL}/payment/success?subscription=intensive_mentorship&paypal=true${course_id ? `&course_id=${course_id}` : ''}`,
+				cancel_url: `${process.env.FRONTEND_URL}/payment/failed?subscription=intensive_mentorship&reason=cancelled&paypal=true${course_id ? `&course_id=${course_id}` : ''}`
+			},
+			custom_id: compactMetadata
+		};
+
+		const response = await fetch(`${PAYPAL_BASE_URL}/v1/billing/subscriptions`, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Authorization: `Bearer ${accessToken}`,
+			},
+			body: JSON.stringify(subscriptionRequest),
+		});
+
+		if (!response.ok) {
+			const errorData = await response.json();
+			console.error('PayPal subscription creation failed:', errorData);
+			return res.status(500).json({ 
+				error: 'Failed to create PayPal subscription',
+				details: errorData.message 
+			});
+		}
+
+		const subscription = await response.json();
+		
+		// NOTE: For subscriptions, we DO NOT create internal orders immediately
+		// The order and booking will be created only when the subscription is activated
+		// via the BILLING.SUBSCRIPTION.ACTIVATED webhook event. This prevents
+		// duplicate bookings when users cancel before completing payment.
+
+		// Find approval URL
+		const approvalUrl = subscription.links.find(
+			(link) => link.rel === 'approve'
+		)?.href;
+
+		res.json({
+			subscriptionId: subscription.id,
+			approvalUrl: approvalUrl,
+		});
+	} catch (error) {
+		console.error('PayPal subscription creation error:', error.message);
+		res.status(500).json({ error: 'Failed to create subscription' });
+	}
+};
+
+/**
  * Create Q&A checkout session
  * POST /paypal/create-qa-checkout
  */
@@ -246,6 +443,11 @@ const createQACheckout = async (req, res) => {
 
 		if (!appointment_type || !full_name || !email || !price || !session_name) {
 			return res.status(400).json({ error: 'Missing required parameters' });
+		}
+
+		// Route intensive mentorship to subscription API
+		if (appointment_type === 'intensive_mentorship' && is_subscription) {
+			return await createSubscription(req, res);
 		}
 
 		// Initialize stores
@@ -332,54 +534,48 @@ const createQACheckout = async (req, res) => {
 		});
 
 		if (!response.ok) {
-			const errorData = await response.json().catch(() => null);
-			console.error('PayPal Q&A Checkout API Error:', {
-				status: response.status,
-				statusText: response.statusText,
-				errorData,
-				orderRequest: JSON.stringify(orderRequest, null, 2)
-			});
-			throw new Error(`Failed to create PayPal Q&A order: ${response.status} - ${JSON.stringify(errorData)}`);
+			console.error('PayPal Q&A Checkout API Error');
+			throw new Error(`Failed to create PayPal Q&A order: ${response.status}`);
 		}
 
 		const order = await response.json();
 
-		// Create consultation order for tracking with booking data
+		// For Q&A consultations, store booking data temporarily in order notes
+		// but do NOT create the actual booking until payment is completed.
+		// This prevents duplicate bookings when users cancel before payment.
+		
+		const bookingDataJson = JSON.stringify({
+			appointment_type,
+			full_name,
+			email,
+			phone_number: phone_number || null,
+			start_time,
+			end_time,
+			notes: notes || null,
+			user_id: user_id,
+		});
+		
+		// Create a temporary order to store booking data, but don't create booking yet
 		let internalOrder = null;
 		if (user_id) {
 			const { OrderStore } = require('../models/order');
 			const orderStore = new OrderStore(req.app.locals.pool);
 
 			try {
-				
-				// Store booking data in the order notes for retrieval after payment
-				const bookingDataJson = JSON.stringify({
-					appointment_type,
-					full_name,
-					email,
-					phone_number: phone_number || null,
-					start_time,
-					end_time,
-					notes: notes || null,
-					user_id: user_id,
-				});
-				
 				internalOrder = await orderStore.createConsultationOrder({
 					user_id: user_id,
 					course_id: course_id,
 					add_on_price: price,
 					item_name: session_name,
-					order_status: 'pending',
+					order_status: 'pending', // Keep as pending until payment complete
 					payment_method: 'paypal',
 					paypal_order_id: order.id,
-					notes: bookingDataJson,
+					notes: bookingDataJson, // Store full booking data here
 				});
 			} catch (orderError) {
-				console.error('Failed to create consultation order:', orderError);
+				console.error('Failed to create temporary consultation order:', orderError);
 				throw orderError;
 			}
-		} else {
-			console.error('No user_id provided for consultation order creation');
 		}
 
 		// Find approval URL
@@ -404,7 +600,6 @@ const createQACheckout = async (req, res) => {
  */
 const createCheckout = async (req, res) => {
 	try {
-		console.log('🚀 PayPal checkout request received:', req.body);
 		const {
 			course_id,
 			course_price,
@@ -419,7 +614,6 @@ const createCheckout = async (req, res) => {
 			qa_booking_data,
 		} = req.body;
 		const userId = req.user.id;
-		console.log('👤 User ID:', userId);
 
 		if (!userId) {
 			return res.status(400).json({ error: 'User ID not found in token' });
@@ -437,9 +631,6 @@ const createCheckout = async (req, res) => {
 
 		// Initialize stores
 		const customerStore = new PayPalCustomerStore(req.app.locals.pool);
-
-		// Find or prepare customer
-		let paypalCustomer = await customerStore.findByUserId(userId);
 
 		// Determine item details
 		let itemName, itemDescription, itemPrice;
@@ -643,7 +834,6 @@ const createCheckout = async (req, res) => {
 		});
 	} catch (error) {
 		console.error('PayPal Checkout error:', error.message);
-		console.error('Full error stack:', error.stack);
 		res.status(500).json({ error: 'Failed to create checkout session' });
 	}
 };
@@ -731,8 +921,7 @@ const createShopCheckout = async (req, res) => {
 			internalOrderId: null,
 		});
 	} catch (error) {
-		console.error('PayPal Shop checkout error:', error);
-		console.error('Error stack:', error.stack);
+		console.error('PayPal Shop checkout error:', error.message);
 		res.status(500).json({ error: 'Failed to create shop checkout session' });
 	}
 };
@@ -962,7 +1151,15 @@ const webhook = async (req, res) => {
 	try {
 		// PayPal webhook verification would go here
 		// For now, we'll handle the common webhook events
-		const event = req.body;
+		
+		// Parse the raw buffer data to JSON
+		let event;
+		if (Buffer.isBuffer(req.body)) {
+			const rawBody = req.body.toString('utf8');
+			event = JSON.parse(rawBody);
+		} else {
+			event = req.body;
+		}
 
 		// Handle the event
 		await handlePayPalEvent(event, req.app.locals.pool);
@@ -1000,11 +1197,30 @@ const captureOrder = async (req, res) => {
 		}
 
 		const orderDetails = await orderResponse.json();
-		console.log('PayPal Order Details:', {
-			id: orderDetails.id,
-			intent: orderDetails.intent,
-			status: orderDetails.status
-		});
+
+		// Check if order is approved before attempting capture
+		if (orderDetails.status !== 'APPROVED') {
+			
+			// Return appropriate error based on status
+			let errorMessage = 'Order not approved for payment';
+			let errorCode = 'ORDER_NOT_APPROVED';
+			
+			if (orderDetails.status === 'CREATED') {
+				errorMessage = 'Payment was not completed. Please complete the payment process on PayPal.';
+			} else if (orderDetails.status === 'CANCELLED') {
+				errorMessage = 'Payment was cancelled. No charges were made.';
+				errorCode = 'ORDER_CANCELLED';
+			} else if (orderDetails.status === 'EXPIRED') {
+				errorMessage = 'Payment session expired. Please start the payment process again.';
+				errorCode = 'ORDER_EXPIRED';
+			}
+			
+			return res.status(422).json({
+				error: errorMessage,
+				code: errorCode,
+				status: orderDetails.status
+			});
+		}
 
 		// Handle based on order intent
 		let response;
@@ -1035,14 +1251,7 @@ const captureOrder = async (req, res) => {
 		}
 
 		if (!response.ok) {
-			const errorData = await response.json().catch(() => null);
-			console.error('PayPal Capture API Error:', {
-				status: response.status,
-				statusText: response.statusText,
-				orderId,
-				errorData
-			});
-			throw new Error(`Failed to capture PayPal order: ${response.status} - ${JSON.stringify(errorData)}`);
+			throw new Error(`Failed to capture PayPal order: ${response.status}`);
 		}
 
 		const result = await response.json();
@@ -1074,7 +1283,30 @@ const captureOrder = async (req, res) => {
 		}
 	} catch (error) {
 		console.error('PayPal Capture error:', error);
-		res.status(500).json({ error: 'Failed to capture order' });
+		
+		// Parse PayPal-specific error messages for better user experience
+		let userMessage = 'Failed to process payment';
+		let errorCode = 'CAPTURE_FAILED';
+		
+		if (error.message && error.message.includes('PAYER_CANNOT_PAY')) {
+			userMessage = 'Payment method declined. Please try a different payment method or check your PayPal account.';
+			errorCode = 'PAYER_CANNOT_PAY';
+		} else if (error.message && error.message.includes('INSUFFICIENT_FUNDS')) {
+			userMessage = 'Insufficient funds in PayPal account. Please add funds or use a different payment method.';
+			errorCode = 'INSUFFICIENT_FUNDS';
+		} else if (error.message && error.message.includes('UNPROCESSABLE_ENTITY')) {
+			userMessage = 'Payment could not be processed. Please try again or use a different payment method.';
+			errorCode = 'UNPROCESSABLE_ENTITY';
+		} else if (error.message && error.message.includes('422')) {
+			userMessage = 'Payment validation failed. Please check your payment details and try again.';
+			errorCode = 'VALIDATION_FAILED';
+		}
+		
+		res.status(422).json({ 
+			error: userMessage,
+			code: errorCode,
+			details: error.message
+		});
 	}
 };
 
@@ -1140,7 +1372,7 @@ const getOrders = async (req, res) => {
  */
 const verifyPayment = async (req, res) => {
 	try {
-		const { order_id, course_id, resource_id } = req.body;
+		const { order_id, resource_id } = req.body;
 		const userId = req.user.id;
 
 		if (!order_id) {
@@ -1170,7 +1402,9 @@ const verifyPayment = async (req, res) => {
 
 		const metadata = JSON.parse(customId);
 
-		if (order.status === 'COMPLETED' && metadata.user_id == userId) {
+		// Extract user_id from both old and new formats
+		const orderUserId = metadata.user_id || metadata.u;
+		if (order.status === 'COMPLETED' && orderUserId == userId) {
 			// Payment was successful, complete the order
 			const orderStore = new OrderStore(req.app.locals.pool);
 
@@ -1207,6 +1441,326 @@ const verifyPayment = async (req, res) => {
 };
 
 /**
+ * Manual subscription activation (for testing when webhooks don't work)
+ * POST /paypal/manual-subscription-activate
+ */
+const manualSubscriptionActivate = async (req, res) => {
+	try {
+		const { subscription_id, user_id, full_name, email, course_id } = req.body;
+		
+		if (!subscription_id || !user_id || !full_name || !email) {
+			return res.status(400).json({ error: 'Missing required fields: subscription_id, user_id, full_name, email' });
+		}
+		
+		// Create the resource object that would come from PayPal webhook
+		const resource = {
+			id: subscription_id,
+			custom_id: JSON.stringify({
+				type: 'intensive_mentorship_subscription',
+				user_id: user_id,
+				course_id: course_id || null,
+				full_name: full_name,
+				email: email
+			})
+		};
+		
+		
+		// Call the same handler as the webhook would
+		await handleSubscriptionActivated(resource, req.app.locals.pool);
+		
+		res.json({ 
+			success: true, 
+			message: 'Subscription activated manually',
+			subscription_id: subscription_id
+		});
+	} catch (error) {
+		console.error('Manual subscription activation failed:', error);
+		res.status(500).json({ error: 'Failed to activate subscription', details: error.message });
+	}
+};
+
+/**
+ * Handle PayPal Subscription Events
+ */
+async function handleSubscriptionActivated(resource, pool) {
+	const client = await pool.connect();
+	try {
+		// Start transaction
+		await client.query('BEGIN');
+		
+		const subscriptionId = resource.id;
+		const customId = resource.custom_id;
+		
+		
+		if (!customId) {
+			console.error('No custom_id found in subscription activation');
+			await client.query('ROLLBACK');
+			return;
+		}
+
+		const metadata = JSON.parse(customId);
+		
+		// Create subscription record FIRST for intensive mentorship (handle both old and new formats)
+		if (metadata.type === 'intensive_mentorship_subscription' || metadata.t === 'ims') {
+			// Extract user_id and course_id from both old and new formats
+			const userId = metadata.user_id || metadata.u;
+			const courseId = metadata.course_id || metadata.c;
+
+			// Check for existing active intensive mentorship subscriptions for this user
+			// Also check that we don't have any existing booking or PayPal subscription records
+			const existingSubscriptionCheck = await client.query(
+				`SELECT s.id, s.paypal_subscription_id, s.paypal_order_id
+				FROM subscriptions s 
+				WHERE s.user_id = $1 
+				AND s.subscription_type = 'intensive_mentorship' 
+				AND s.status = 'active'
+				AND s.paypal_subscription_id != $2`,
+				[parseInt(userId), subscriptionId]
+			);
+			
+			// Additional check for PayPal subscription records in paypal_subscriptions table
+			// This ensures we don't have duplicate PayPal subscription records
+			const existingPayPalSubCheck = await client.query(
+				`SELECT id FROM paypal_subscriptions 
+				WHERE subscription_id = $1 AND subscription_status = 'ACTIVE'`,
+				[subscriptionId]
+			);
+			
+			if (existingPayPalSubCheck.rows.length > 0) {
+				await client.query('ROLLBACK');
+				return;
+			}
+			
+			// Only block if there's an active subscription AND it still has related PayPal records
+			// This allows reactivation after proper admin deletion
+			if (existingSubscriptionCheck.rows.length > 0) {
+				const existingSub = existingSubscriptionCheck.rows[0];
+				
+				// Check if the existing subscription has valid PayPal records
+				const hasValidPayPalRecords = await client.query(
+					`SELECT 1 FROM paypal_subscriptions ps 
+					WHERE ps.subscription_id = $1 
+					OR EXISTS (
+						SELECT 1 FROM paypal_orders po 
+						WHERE po.paypal_order_id = $2 AND po.payment_status = 'COMPLETED'
+					)`,
+					[existingSub.paypal_subscription_id, existingSub.paypal_order_id]
+				);
+				
+				// Only block if there are still valid PayPal records (incomplete deletion)
+				if (hasValidPayPalRecords.rows.length > 0) {
+					await client.query('ROLLBACK');
+					return;
+				} else {
+					// Clean up orphaned subscription record if no PayPal records exist
+					await client.query(
+						'DELETE FROM subscriptions WHERE id = $1',
+						[existingSub.id]
+					);
+				}
+			}
+
+			// Create subscription record first
+			const subscriptionSql = `
+				INSERT INTO subscriptions (
+					user_id, paypal_subscription_id, subscription_type, resource_id, 
+					status, current_period_start, current_period_end, cancel_at_period_end,
+					price_cents, metadata
+				)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+				ON CONFLICT (paypal_subscription_id) 
+				DO UPDATE SET 
+					status = EXCLUDED.status,
+					current_period_start = EXCLUDED.current_period_start,
+					current_period_end = EXCLUDED.current_period_end,
+					updated_at = CURRENT_TIMESTAMP
+				RETURNING id
+			`;
+
+			const startDate = resource.start_time ? new Date(resource.start_time) : new Date();
+			const endDate = resource.billing_info?.next_billing_time 
+				? new Date(resource.billing_info.next_billing_time)
+				: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+			const priceCents = Math.round((parseFloat(resource.billing_info?.cycle_executions?.[0]?.pricing_scheme?.fixed_price?.value || '100.00')) * 100);
+
+			const subscriptionResult = await client.query(subscriptionSql, [
+				parseInt(userId),
+				subscriptionId,
+				'intensive_mentorship',
+				courseId && courseId !== '0' ? parseInt(courseId) : null,
+				'active',
+				startDate,
+				endDate,
+				false,
+				priceCents,
+				JSON.stringify({
+					description: 'Intensive Mentorship Monthly Subscription',
+					features: [
+						'Weekly 20-min calls',
+						'3 questions per week', 
+						'Advanced training',
+						'Dedicated instructor relationship'
+					]
+				})
+			]);
+
+
+			// Only create booking and order AFTER subscription is successful
+			// Create a pool-like object that uses our transaction client
+			const transactionClient = {
+				query: (sql, params) => client.query(sql, params),
+				release: () => {} // Do nothing - don't release during transaction
+			};
+			const transactionPool = {
+				connect: () => Promise.resolve(transactionClient),
+				query: (sql, params) => client.query(sql, params)
+			};
+			
+			const { BookingsStore } = require('../models/booking');
+			const bookingsStore = new BookingsStore(transactionPool);
+			const { OrderStore } = require('../models/order');
+			const orderStore = new OrderStore(transactionPool);
+
+			// Create internal order for the subscription (only if it doesn't exist)
+			try {
+				// Check if order already exists to prevent duplicates
+				const existingOrder = await orderStore.getByPayPalOrder(subscriptionId);
+				if (!existingOrder) {
+					await orderStore.createConsultationOrder({
+						user_id: parseInt(userId),
+						course_id: courseId && courseId !== '0' ? parseInt(courseId) : null,
+						add_on_price: 100.00, // Subscription price
+						item_name: 'Intensive Mentorship Subscription',
+						order_status: 'completed', // Mark as completed since subscription is activated
+						payment_method: 'paypal',
+						paypal_order_id: subscriptionId,
+						notes: JSON.stringify({
+							subscription_type: 'intensive_mentorship',
+							subscription_id: subscriptionId,
+							subscription_record_id: subscriptionResult.rows[0].id,
+							activated_at: new Date().toISOString()
+						}),
+					});
+				}
+				
+				// Create the booking
+				const bookingData = {
+					appointment_type: 'intensive_mentorship',
+					full_name: metadata.full_name || 'Subscription User',
+					email: metadata.email || 'unknown@email.com',
+					phone_number: metadata.phone_number || null,
+					start_time: metadata.start_time || new Date().toISOString(),
+					end_time: metadata.end_time || new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+					notes: metadata.notes || 'Intensive mentorship subscription',
+					user_id: parseInt(userId),
+					status: 'confirmed'
+				};
+				
+				// Check for duplicates
+				const existingBookings = await bookingsStore.getBookingsByEmail(bookingData.email);
+				const duplicateBooking = existingBookings.find(booking => 
+					booking.appointment_type === 'intensive_mentorship' &&
+					booking.user_id === bookingData.user_id &&
+					booking.status !== 'cancelled'
+				);
+				
+				if (!duplicateBooking) {
+					await bookingsStore.createBooking(bookingData);
+				}
+			} catch (error) {
+				console.error('Failed to create booking after subscription activation:', error);
+			}
+		}
+
+		// Commit transaction
+		await client.query('COMMIT');
+
+	} catch (error) {
+		console.error('Error handling subscription activation:', error);
+		if (client) {
+			await client.query('ROLLBACK');
+		}
+		throw error;
+	} finally {
+		if (client) {
+			client.release();
+		}
+	}
+}
+
+async function handleSubscriptionCancelled(resource, pool) {
+	try {
+		const subscriptionId = resource.id;
+		
+		// Update subscription status
+		const updateSql = `
+			UPDATE subscriptions 
+			SET status = 'cancelled', cancel_at_period_end = true, updated_at = CURRENT_TIMESTAMP
+			WHERE paypal_subscription_id = $1
+		`;
+		await pool.query(updateSql, [subscriptionId]);
+		
+	} catch (error) {
+		console.error('Error handling subscription cancellation:', error);
+	}
+}
+
+async function handleSubscriptionPaymentCompleted(resource, pool) {
+	try {
+		const subscriptionId = resource.billing_agreement_id;
+		
+		// Update next billing date
+		const updateSql = `
+			UPDATE subscriptions 
+			SET 
+				current_period_start = current_period_end,
+				current_period_end = current_period_end + INTERVAL '1 month',
+				updated_at = CURRENT_TIMESTAMP
+			WHERE paypal_subscription_id = $1
+		`;
+		await pool.query(updateSql, [subscriptionId]);
+		
+	} catch (error) {
+		console.error('Error handling subscription payment completion:', error);
+	}
+}
+
+async function handleSubscriptionPaymentFailed(resource, pool) {
+	try {
+		const subscriptionId = resource.billing_agreement_id;
+		
+		if (!subscriptionId) {
+			console.error('No subscription ID found in payment failure event');
+			return;
+		}
+		
+		// Update subscription status to past_due
+		const updateSql = `
+			UPDATE subscriptions 
+			SET status = 'past_due', updated_at = CURRENT_TIMESTAMP
+			WHERE paypal_subscription_id = $1
+			RETURNING user_id, subscription_type
+		`;
+		
+		const result = await pool.query(updateSql, [subscriptionId]);
+		
+		if (result.rows.length > 0) {
+			const { user_id, subscription_type } = result.rows[0];
+			
+			// For intensive mentorship, pause access but don't cancel bookings yet
+			// Give user a grace period to update payment method
+			if (subscription_type === 'intensive_mentorship') {
+				// Could implement notification logic here
+				// For now, just mark as past_due to give user grace period
+			}
+		}
+		
+	} catch (error) {
+		console.error('Error handling subscription payment failure:', error.message);
+	}
+}
+
+/**
  * Handle PayPal webhook events
  */
 async function handlePayPalEvent(event, pool) {
@@ -1214,6 +1768,27 @@ async function handlePayPalEvent(event, pool) {
 	const resource = event.resource;
 
 	if (!resource) {
+		return;
+	}
+
+	// Handle subscription events
+	if (eventType === 'BILLING.SUBSCRIPTION.ACTIVATED') {
+		await handleSubscriptionActivated(resource, pool);
+		return;
+	}
+
+	if (eventType === 'BILLING.SUBSCRIPTION.CANCELLED') {
+		await handleSubscriptionCancelled(resource, pool);
+		return;
+	}
+
+	if (eventType === 'BILLING.SUBSCRIPTION.PAYMENT.COMPLETED') {
+		await handleSubscriptionPaymentCompleted(resource, pool);
+		return;
+	}
+
+	if (eventType === 'BILLING.SUBSCRIPTION.PAYMENT.FAILED') {
+		await handleSubscriptionPaymentFailed(resource, pool);
 		return;
 	}
 
@@ -1228,13 +1803,21 @@ async function handlePayPalEvent(event, pool) {
 			resource.purchase_units?.[0]?.payments?.captures?.[0]?.id || 
 			resource.purchase_units?.[0]?.payments?.authorizations?.[0]?.id ||
 			resource.id;
-		const amountValue = parseFloat(
-			resource.purchase_units?.[0]?.amount?.value ||
-				resource.amount?.value ||
-				'0'
-		);
+		
+		// Extract amount from multiple possible locations
+		let amountValue = 0;
+		
+		if (resource.purchase_units?.[0]?.amount?.value) {
+			amountValue = parseFloat(resource.purchase_units[0].amount.value);
+		} else if (resource.purchase_units?.[0]?.payments?.captures?.[0]?.amount?.value) {
+			amountValue = parseFloat(resource.purchase_units[0].payments.captures[0].amount.value);
+		} else if (resource.amount?.value) {
+			amountValue = parseFloat(resource.amount.value);
+		}
+		
 		const amountCurrency =
 			resource.purchase_units?.[0]?.amount?.currency_code ||
+			resource.purchase_units?.[0]?.payments?.captures?.[0]?.amount?.currency_code ||
 			resource.amount?.currency_code ||
 			'USD';
 		const customId =
@@ -1276,6 +1859,8 @@ async function handlePayPalEvent(event, pool) {
 					captureId: captureId,
 					paymentStatus: 'COMPLETED',
 					status: 'completed',
+					amountValue: amountValue,
+					amountCurrency: amountCurrency,
 				});
 			} catch (updateError) {
 				console.error('Failed to create or update PayPal order:', updateError);
@@ -1307,92 +1892,69 @@ async function handlePayPalEvent(event, pool) {
 		// Handle Q&A consultation
 		if (metadata.type === 'qa') {
 			const { OrderStore } = require('../models/order');
+			const { BookingsStore } = require('../models/booking');
 			const orderStore = new OrderStore(pool);
+			const bookingsStore = new BookingsStore(pool);
 
 			try {
-				const completedOrder = await orderStore.completeFromPayPal(
-					orderId,
-					captureId
-				);
+				// Complete the existing internal order
+				const completedOrder = await orderStore.completeFromPayPal(orderId, captureId);
 
 				// Create booking after successful payment - retrieve data from internal order
-				try {
-					const { BookingsStore } = require('../models/booking');
-					const bookingsStore = new BookingsStore(pool);
-					const { OrderStore } = require('../models/order');
-					const orderStore = new OrderStore(pool);
-					
-					// Find the internal order by PayPal order ID to get booking data
+				if (completedOrder) {
+					// Get the internal order to retrieve booking data
 					const internalOrder = await orderStore.getByPayPalOrder(orderId);
 					
 					if (internalOrder && internalOrder.notes) {
-						
-						// Try to parse the booking data from order notes
+						// Parse the booking data from order notes
 						let bookingData;
 						try {
 							bookingData = JSON.parse(internalOrder.notes);
 						} catch (parseError) {
 							console.error('Failed to parse booking data from order notes:', parseError);
-							console.error('Raw notes content:', internalOrder.notes);
 							throw new Error(`Invalid booking data in order notes: ${parseError.message}`);
 						}
 						
-						// Check if booking already exists for this PayPal order to prevent duplicates
+						// Check for duplicate bookings
 						const existingBookings = await bookingsStore.getBookingsByEmail(bookingData.email);
+						const duplicateBooking = existingBookings.find(booking => 
+							booking.appointment_type === metadata.apt &&
+							booking.user_id === bookingData.user_id &&
+							booking.status !== 'cancelled' &&
+							// For same appointment type and time, check duplicates
+							(booking.start_time === bookingData.start_time && booking.end_time === bookingData.end_time)
+						);
 						
-						// For intensive mentorship, also check by user_id and appointment_type since dates might be unreliable
-						let duplicateBooking;
-						if (metadata.apt === 'intensive_mentorship') {
-							duplicateBooking = existingBookings.find(booking => 
-								booking.appointment_type === metadata.apt &&
-								booking.user_id === bookingData.user_id &&
-								booking.status !== 'cancelled'
-							);
-						} else {
-							duplicateBooking = existingBookings.find(booking => 
-								booking.appointment_type === metadata.apt &&
-								booking.start_time === bookingData.start_time &&
-								booking.end_time === bookingData.end_time &&
-								booking.status !== 'cancelled'
-							);
-						}
-						
-						if (duplicateBooking) {
-							return; // Skip creating duplicate booking
-						}
-						
-						// Create the booking
-						const createdBooking = await bookingsStore.createBooking(bookingData);
-						
-						// Trigger AI response for written guidance
-						if (metadata.apt === 'written_guidance' && createdBooking) {
-							setTimeout(() => {
-								handleWrittenGuidanceResponse(
-									parseInt(metadata.uid),
-									createdBooking.notes,
-									metadata.cid,
-									orderId
-								).catch((error) => {
-									console.error('Background AI response failed:', error);
-								});
-							}, 100);
+						if (!duplicateBooking) {
+							// Set proper status based on appointment type
+							bookingData.status = metadata.apt === 'live_consultation' ? 'scheduled' : 'confirmed';
+							
+							// Create the booking
+							const createdBooking = await bookingsStore.createBooking(bookingData);
+							
+							// Trigger AI response for written guidance
+							if (metadata.apt === 'written_guidance' && createdBooking) {
+								setTimeout(() => {
+									handleWrittenGuidanceResponse(
+										parseInt(metadata.uid),
+										createdBooking.notes,
+										metadata.cid,
+										orderId
+									).catch((error) => {
+										console.error('Background AI response failed:', error);
+									});
+								}, 100);
+							}
 						}
 					} else {
-						console.error('CRITICAL ERROR: No internal order found for PayPal order:', orderId);
-						console.error('This should NEVER happen - internal order should always exist');
-						throw new Error(`Internal order not found for PayPal order: ${orderId}`);
+						console.error('No booking data found in internal order notes');
 					}
-				} catch (error) {
-					console.error('Failed to create booking after payment:', error);
 				}
 			} catch (error) {
-				console.error('Failed to complete consultation order from PayPal');
+				console.error('Failed to complete Q&A consultation order:', error);
 			}
 		} else if (metadata.is_shop_purchase === 'true') {
 			// Shop purchase - order record already exists in paypal_orders
-			console.log(
-				`Shop purchase completed for resource ${metadata.resource_id}`
-			);
 		} else {
 			// Complete the main order (course/resource enrollment)
 			const { OrderStore } = require('../models/order');
@@ -1401,46 +1963,20 @@ async function handlePayPalEvent(event, pool) {
 			try {
 				await orderStore.completeFromPayPal(orderId, captureId);
 			} catch (error) {
-				console.error(
-					'Failed to complete main order from PayPal:',
-					error.message
-				);
-				console.error('PayPal Order ID:', orderId);
-				console.error('Capture ID:', captureId);
+				console.error('Failed to complete main order from PayPal:', error.message);
 			}
 		}
 
-		// Handle subscription creation for AI Sifu or intensive mentorship
-		if (
-			metadata.is_ai_sifu_subscription === 'true' ||
-			metadata.apt === 'intensive_mentorship'
-		) {
+		// Handle subscription creation for AI Sifu only (intensive mentorship now uses proper PayPal subscriptions)
+		if (metadata.is_ai_sifu_subscription === 'true') {
 			try {
-				let subscriptionType =
-					metadata.is_ai_sifu_subscription === 'true'
-						? 'ai_sifu'
-						: 'intensive_mentorship';
-				let subscriptionMetadata = {};
-
-				if (subscriptionType === 'ai_sifu') {
-					subscriptionMetadata = {
-						description: 'AI Sifu Monthly Subscription',
-						features: [
-							'12 questions per month',
-							'Personal AI martial arts guide',
-						],
-					};
-				} else {
-					subscriptionMetadata = {
-						description: 'Intensive Mentorship Monthly Subscription',
-						features: [
-							'Weekly 20-min calls',
-							'3 questions per week',
-							'Advanced training',
-							'Dedicated instructor relationship',
-						],
-					};
-				}
+				const subscriptionMetadata = {
+					description: 'AI Sifu Monthly Subscription',
+					features: [
+						'12 questions per month',
+						'Personal AI martial arts guide',
+					],
+				};
 
 				// Create subscription record in general subscriptions table
 				const subscriptionSql = `
@@ -1465,7 +2001,7 @@ async function handlePayPalEvent(event, pool) {
 				await pool.query(subscriptionSql, [
 					parseInt(metadata.uid),
 					orderId,
-					subscriptionType,
+					'ai_sifu',
 					metadata.cid ? parseInt(metadata.cid) : null,
 					'active',
 					startDate,
@@ -1475,7 +2011,7 @@ async function handlePayPalEvent(event, pool) {
 					JSON.stringify(subscriptionMetadata),
 				]);
 			} catch (error) {
-				console.error('Error creating PayPal subscription:', error);
+				console.error('Error creating PayPal AI Sifu subscription:', error);
 			}
 		}
 	}
@@ -1490,7 +2026,10 @@ const paypal_route = (app) => {
 
 	// Public routes
 	app.post('/paypal/create-qa-checkout', createQACheckout); // Q&A checkout can be used by guests
+	app.post('/paypal/create-subscription', createSubscription); // Intensive mentorship subscription creation
+	app.post('/paypal/setup-subscription-plan', setupSubscriptionPlan); // Setup subscription plan (run once)
 	app.post('/paypal/create-shop-checkout', createShopCheckout); // Shop checkout for public purchases
+	app.post('/paypal/manual-subscription-activate', manualSubscriptionActivate); // Manual subscription activation for testing
 	app.get('/paypal/shop-download/:orderId', shopDownload); // Public download after shop purchase
 	app.get('/paypal/shop-info/:orderId', shopInfo); // Get resource info without download
 	app.post('/paypal/capture/:orderId', captureOrder); // Capture order after approval

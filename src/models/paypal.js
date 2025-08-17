@@ -247,15 +247,18 @@ class PayPalOrderStore {
 
 	async updatePaymentStatus(paypalOrderId, updateData) {
 		try {
-			const { captureId, paymentStatus, status } = updateData;
+			const { captureId, paymentStatus, status, amountValue, amountCurrency } = updateData;
 			const query = `
 				UPDATE paypal_orders 
-				SET capture_id = $2, payment_status = $3, status = $4, updated_at = NOW()
+				SET capture_id = $2, payment_status = $3, status = $4, 
+				    amount_value = COALESCE($5, amount_value), 
+				    amount_currency = COALESCE($6, amount_currency), 
+				    updated_at = NOW()
 				WHERE paypal_order_id = $1 AND deleted_at IS NULL
 				RETURNING *
 			`;
 			const client = await this.pool.connect();
-			const result = await client.query(query, [paypalOrderId, captureId, paymentStatus, status]);
+			const result = await client.query(query, [paypalOrderId, captureId, paymentStatus, status, amountValue, amountCurrency]);
 			client.release();
 			return result.rows[0];
 		} catch (error) {

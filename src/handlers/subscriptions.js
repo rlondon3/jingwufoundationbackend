@@ -17,6 +17,7 @@ const getUserSubscriptions = async (req, res) => {
       SELECT 
         s.id,
         s.stripe_subscription_id,
+        s.paypal_subscription_id,
         s.subscription_type,
         s.resource_id,
         s.status,
@@ -26,10 +27,30 @@ const getUserSubscriptions = async (req, res) => {
         s.price_cents,
         s.metadata
       FROM subscriptions s
-      INNER JOIN stripe_subscriptions ss ON s.stripe_subscription_id = ss.subscription_id
+      LEFT JOIN stripe_subscriptions ss ON s.stripe_subscription_id = ss.subscription_id
+      LEFT JOIN bookings b ON (
+        -- For intensive_mentorship, require a corresponding booking
+        (s.subscription_type = 'intensive_mentorship' AND b.appointment_type = 'intensive_mentorship' AND b.user_id = s.user_id AND b.status = 'confirmed')
+        OR
+        -- For ai_sifu, no booking required
+        (s.subscription_type = 'ai_sifu')
+      )
       WHERE s.user_id = $1 
       AND s.status IN ('active', 'past_due')
-      AND ss.status IN ('active', 'past_due')
+      AND (
+        -- Include Stripe subscriptions that are active
+        (s.stripe_subscription_id IS NOT NULL AND ss.status IN ('active', 'past_due'))
+        OR 
+        -- Include PayPal subscriptions (no need for stripe_subscriptions check)
+        (s.paypal_subscription_id IS NOT NULL)
+      )
+      AND (
+        -- For intensive_mentorship, must have a booking
+        (s.subscription_type = 'intensive_mentorship' AND b.id IS NOT NULL)
+        OR
+        -- For ai_sifu, no booking required
+        (s.subscription_type = 'ai_sifu')
+      )
       ORDER BY s.created_at DESC
     `;
     
@@ -117,9 +138,10 @@ const cancelIntensiveMentorshipSubscription = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // Get active intensive mentorship subscription from database
+    // Get active intensive mentorship subscription from database (both Stripe and PayPal)
+    // Order by creation date DESC to get the most recent active subscription
     const subscriptionQuery = await req.app.locals.pool.query(
-      'SELECT stripe_subscription_id, current_period_end FROM subscriptions WHERE user_id = $1 AND subscription_type = $2 AND status = $3',
+      'SELECT id, stripe_subscription_id, paypal_subscription_id, current_period_end FROM subscriptions WHERE user_id = $1 AND subscription_type = $2 AND status = $3 ORDER BY created_at DESC LIMIT 1',
       [userId, 'intensive_mentorship', 'active']
     );
 
@@ -127,28 +149,78 @@ const cancelIntensiveMentorshipSubscription = async (req, res) => {
       return res.status(404).json({ error: 'No active Intensive Mentorship subscription found' });
     }
 
-    const stripeSubscriptionId = subscriptionQuery.rows[0].stripe_subscription_id;
-    const currentPeriodEnd = subscriptionQuery.rows[0].current_period_end;
+    const subscription = subscriptionQuery.rows[0];
+    const { id: subscriptionId, stripe_subscription_id, paypal_subscription_id, current_period_end } = subscription;
 
-    // Cancel subscription in Stripe
-    const subscription = await stripe.subscriptions.update(stripeSubscriptionId, {
-      cancel_at_period_end: true
-    });
+    // Handle Stripe subscription cancellation
+    if (stripe_subscription_id) {
+      // Cancel subscription in Stripe
+      await stripe.subscriptions.update(stripe_subscription_id, {
+        cancel_at_period_end: true
+      });
 
-    // Update subscription in database
-    await req.app.locals.pool.query(
-      'UPDATE subscriptions SET cancel_at_period_end = true, updated_at = CURRENT_TIMESTAMP WHERE stripe_subscription_id = $1',
-      [stripeSubscriptionId]
-    );
+      // Update subscription in database
+      await req.app.locals.pool.query(
+        'UPDATE subscriptions SET cancel_at_period_end = true, updated_at = CURRENT_TIMESTAMP WHERE id = $1',
+        [subscriptionId]
+      );
+    }
+    // Handle PayPal subscription cancellation
+    else if (paypal_subscription_id) {
+      // Get PayPal access token
+      const paypalAuth = await fetch(`${process.env.PAYPAL_ENVIRONMENT === 'sandbox' ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com'}/v1/oauth2/token`, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'Accept-Language': 'en_US',
+          'Authorization': `Basic ${Buffer.from(`${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_CLIENT_SECRET}`).toString('base64')}`,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: 'grant_type=client_credentials'
+      });
 
+      if (!paypalAuth.ok) {
+        throw new Error('Failed to get PayPal access token');
+      }
+
+      const { access_token } = await paypalAuth.json();
+
+      // Cancel PayPal subscription
+      const cancelResponse = await fetch(`${process.env.PAYPAL_ENVIRONMENT === 'sandbox' ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com'}/v1/billing/subscriptions/${paypal_subscription_id}/cancel`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${access_token}`,
+          'Accept': 'application/json',
+          'PayPal-Request-Id': `cancel-${paypal_subscription_id}-${Date.now()}`
+        },
+        body: JSON.stringify({
+          reason: 'User requested cancellation'
+        })
+      });
+
+      if (!cancelResponse.ok) {
+        throw new Error('PayPal cancellation failed');
+      }
+
+      // Update subscription in database - PayPal subscriptions cancel immediately
+      await req.app.locals.pool.query(
+        'UPDATE subscriptions SET status = $1, cancel_at_period_end = true, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+        ['cancelled', subscriptionId]
+      );
+    } else {
+      return res.status(400).json({ error: 'Subscription has no valid payment method ID' });
+    }
 
     res.json({
       success: true,
-      message: `Intensive Mentorship cancelled successfully. You will retain access until ${new Date(currentPeriodEnd).toLocaleDateString()}.`,
-      cancels_at: currentPeriodEnd
+      message: stripe_subscription_id 
+        ? `Intensive Mentorship cancelled successfully. You will retain access until ${new Date(current_period_end).toLocaleDateString()}.`
+        : 'Intensive Mentorship cancelled successfully.',
+      cancels_at: current_period_end
     });
   } catch (error) {
-    console.error('Error cancelling intensive mentorship subscription:', error);
+    console.error('Error cancelling intensive mentorship subscription:', error.message);
     res.status(500).json({ error: 'Failed to cancel subscription' });
   }
 };
@@ -235,36 +307,311 @@ const activateIntensiveMentorshipSubscription = async (req, res) => {
 };
 
 /**
- * Cleanup orphaned subscriptions that don't exist in Stripe
+ * Cleanup orphaned subscriptions that don't exist in Stripe or PayPal
  * POST /subscriptions/cleanup-orphaned (admin only)
  */
 const cleanupOrphanedSubscriptions = async (req, res) => {
   try {
-    // Mark subscriptions as cancelled if they don't have a corresponding active record in stripe_subscriptions
-    const cleanupSql = `
-      UPDATE subscriptions 
-      SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
-      WHERE status IN ('active', 'past_due')
-      AND stripe_subscription_id NOT IN (
-        SELECT subscription_id 
-        FROM stripe_subscriptions 
-        WHERE status IN ('active', 'past_due')
-        AND subscription_id IS NOT NULL
-      )
-      RETURNING id, stripe_subscription_id, subscription_type, status
-    `;
+    // Check if user is admin
+    if (!req.user.is_admin) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
 
-    const result = await req.app.locals.pool.query(cleanupSql);
+    const client = await req.app.locals.pool.connect();
     
+    try {
+      await client.query('BEGIN');
+      
+      const cleanupResults = {
+        stripe_orphaned: 0,
+        paypal_orphaned: 0,
+        orphaned_bookings: 0,
+        total_cleaned: 0
+      };
 
-    res.json({
-      success: true,
-      message: `Cleaned up ${result.rows.length} orphaned subscriptions`,
-      updated_subscriptions: result.rows
-    });
+      // 1. Mark Stripe subscriptions as cancelled if they don't have corresponding active records
+      const stripeCleanupSql = `
+        UPDATE subscriptions 
+        SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+        WHERE status IN ('active', 'past_due')
+        AND stripe_subscription_id IS NOT NULL
+        AND stripe_subscription_id NOT IN (
+          SELECT subscription_id 
+          FROM stripe_subscriptions 
+          WHERE status IN ('active', 'past_due')
+          AND subscription_id IS NOT NULL
+        )
+        RETURNING id, stripe_subscription_id, subscription_type, status
+      `;
+
+      const stripeResult = await client.query(stripeCleanupSql);
+      cleanupResults.stripe_orphaned = stripeResult.rows.length;
+
+      // 2. Handle PayPal subscriptions - mark as cancelled if no valid PayPal records exist
+      const paypalOrphanedSubs = await client.query(`
+        SELECT s.id, s.user_id, s.paypal_subscription_id, s.paypal_order_id, s.subscription_type
+        FROM subscriptions s
+        WHERE s.status IN ('active', 'past_due')
+        AND s.paypal_subscription_id IS NOT NULL
+        AND (
+          -- No matching PayPal subscription record
+          NOT EXISTS (
+            SELECT 1 FROM paypal_subscriptions ps 
+            WHERE ps.subscription_id = s.paypal_subscription_id
+            AND ps.subscription_status = 'ACTIVE'
+          )
+          OR
+          -- No matching PayPal order with completed payment
+          (s.paypal_order_id IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM paypal_orders po
+            WHERE po.paypal_order_id = s.paypal_order_id 
+            AND po.payment_status = 'COMPLETED'
+          ))
+        )
+      `);
+
+      for (const sub of paypalOrphanedSubs.rows) {
+        // Mark subscription as cancelled
+        await client.query(
+          'UPDATE subscriptions SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+          ['cancelled', sub.id]
+        );
+        
+        // Cancel related intensive mentorship bookings
+        if (sub.subscription_type === 'intensive_mentorship') {
+          const cancelledBookings = await client.query(
+            `UPDATE bookings 
+             SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP 
+             WHERE user_id = $1 AND appointment_type = 'intensive_mentorship' 
+             AND status IN ('confirmed', 'scheduled')
+             RETURNING id`,
+            [sub.user_id]
+          );
+          cleanupResults.orphaned_bookings += cancelledBookings.rows.length;
+        }
+        
+        cleanupResults.paypal_orphaned++;
+      }
+
+      cleanupResults.total_cleaned = cleanupResults.stripe_orphaned + cleanupResults.paypal_orphaned;
+
+      await client.query('COMMIT');
+      client.release();
+
+      res.json({
+        success: true,
+        message: `Cleaned up ${cleanupResults.total_cleaned} orphaned subscriptions`,
+        results: cleanupResults
+      });
+      
+    } catch (error) {
+      await client.query('ROLLBACK');
+      client.release();
+      throw error;
+    }
   } catch (error) {
     console.error('Error cleaning up orphaned subscriptions:', error);
     res.status(500).json({ error: 'Failed to cleanup orphaned subscriptions' });
+  }
+};
+
+/**
+ * Get all subscriptions for admin management
+ * GET /subscriptions/admin/all
+ */
+const getAllSubscriptionsAdmin = async (req, res) => {
+  try {
+    // Check if user is admin
+    if (!req.user.is_admin) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    
+    const sql = `
+      SELECT 
+        s.id,
+        s.user_id,
+        s.stripe_subscription_id,
+        s.paypal_subscription_id,
+        s.subscription_type,
+        s.resource_id,
+        s.status,
+        s.current_period_start,
+        s.current_period_end,
+        s.cancel_at_period_end,
+        s.price_cents,
+        s.metadata,
+        s.created_at,
+        s.updated_at,
+        u.name as user_name,
+        u.email as user_email
+      FROM subscriptions s
+      LEFT JOIN users u ON s.user_id = u.id
+      ORDER BY s.created_at DESC
+    `;
+    
+    const client = await req.app.locals.pool.connect();
+    const result = await client.query(sql);
+    client.release();
+    
+    res.json({ subscriptions: result.rows });
+  } catch (error) {
+    console.error('Error fetching all subscriptions for admin:', error);
+    res.status(500).json({ error: 'Failed to fetch subscriptions' });
+  }
+};
+
+/**
+ * Delete subscription (admin only)
+ * DELETE /subscriptions/admin/:subscriptionId
+ */
+const deleteSubscriptionAdmin = async (req, res) => {
+  try {
+    // Check if user is admin
+    if (!req.user.is_admin) {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    
+    const { subscriptionId } = req.params;
+    
+    const client = await req.app.locals.pool.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      // Get subscription details before deletion
+      const getSubscriptionSql = 'SELECT * FROM subscriptions WHERE id = $1';
+      const subscriptionResult = await client.query(getSubscriptionSql, [subscriptionId]);
+      
+      if (subscriptionResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        client.release();
+        return res.status(404).json({ error: 'Subscription not found' });
+      }
+      
+      const subscription = subscriptionResult.rows[0];
+      
+      // Cancel PayPal subscription if it exists
+      if (subscription.paypal_subscription_id && subscription.status === 'active') {
+        try {
+          // Get PayPal access token
+          const paypalAuth = await fetch(`${process.env.PAYPAL_ENVIRONMENT === 'sandbox' ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com'}/v1/oauth2/token`, {
+            method: 'POST',
+            headers: {
+              'Accept': 'application/json',
+              'Accept-Language': 'en_US',
+              'Authorization': `Basic ${Buffer.from(`${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_CLIENT_SECRET}`).toString('base64')}`,
+              'Content-Type': 'application/x-www-form-urlencoded'
+            },
+            body: 'grant_type=client_credentials'
+          });
+
+          if (paypalAuth.ok) {
+            const { access_token } = await paypalAuth.json();
+
+            // Cancel PayPal subscription
+            await fetch(`${process.env.PAYPAL_ENVIRONMENT === 'sandbox' ? 'https://api-m.sandbox.paypal.com' : 'https://api-m.paypal.com'}/v1/billing/subscriptions/${subscription.paypal_subscription_id}/cancel`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${access_token}`,
+                'Accept': 'application/json',
+                'PayPal-Request-Id': `admin-cancel-${subscription.paypal_subscription_id}-${Date.now()}`
+              },
+              body: JSON.stringify({
+                reason: 'Admin deleted subscription'
+              })
+            });
+          }
+        } catch (paypalError) {
+          console.error('Failed to cancel PayPal subscription:', paypalError);
+          // Continue with deletion even if PayPal cancellation fails
+        }
+      }
+      
+      // Cancel Stripe subscription if it exists  
+      if (subscription.stripe_subscription_id && subscription.status === 'active') {
+        try {
+          const Stripe = require('stripe');
+          const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+          await stripe.subscriptions.cancel(subscription.stripe_subscription_id);
+        } catch (stripeError) {
+          console.error('Failed to cancel Stripe subscription:', stripeError);
+          // Continue with deletion even if Stripe cancellation fails
+        }
+      }
+      
+      // Cancel/delete associated bookings for intensive mentorship
+      if (subscription.subscription_type === 'intensive_mentorship') {
+        await client.query(
+          `UPDATE bookings 
+           SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP 
+           WHERE user_id = $1 
+           AND appointment_type = 'intensive_mentorship' 
+           AND status IN ('confirmed', 'scheduled')`,
+          [subscription.user_id]
+        );
+      }
+      
+      // Clean up PayPal-related tables if PayPal subscription exists
+      if (subscription.paypal_subscription_id) {
+        // Delete from paypal_subscriptions table
+        await client.query(
+          'DELETE FROM paypal_subscriptions WHERE subscription_id = $1',
+          [subscription.paypal_subscription_id]
+        );
+        
+        // Get payer_id for cleaning up customer record if needed
+        const payerResult = await client.query(
+          'SELECT payer_id FROM paypal_customers WHERE user_id = $1',
+          [subscription.user_id]
+        );
+        
+        if (payerResult.rows.length > 0) {
+          const payerId = payerResult.rows[0].payer_id;
+          
+          // Delete related paypal_orders for this payer
+          await client.query(
+            'DELETE FROM paypal_orders WHERE payer_id = $1',
+            [payerId]
+          );
+        }
+      }
+      
+      // Clean up orders table entries with paypal_order_id or paypal subscription reference
+      if (subscription.paypal_subscription_id) {
+        await client.query(
+          'DELETE FROM orders WHERE paypal_order_id = $1',
+          [subscription.paypal_subscription_id]
+        );
+      }
+      
+      if (subscription.paypal_order_id) {
+        await client.query(
+          'DELETE FROM orders WHERE paypal_order_id = $1',
+          [subscription.paypal_order_id]
+        );
+      }
+      
+      // Delete the subscription
+      const deleteSql = 'DELETE FROM subscriptions WHERE id = $1 RETURNING *';
+      const deleteResult = await client.query(deleteSql, [subscriptionId]);
+      
+      await client.query('COMMIT');
+      client.release();
+      
+      res.json({ 
+        success: true, 
+        message: 'Subscription cancelled and deleted successfully',
+        deleted_subscription: deleteResult.rows[0]
+      });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      client.release();
+      throw error;
+    }
+  } catch (error) {
+    console.error('Error deleting subscription:', error);
+    res.status(500).json({ error: 'Failed to delete subscription' });
   }
 };
 
@@ -277,7 +624,11 @@ const subscriptions_route = (app) => {
   app.get('/subscriptions/booking/:bookingId', authenticationToken, getSubscriptionByBookingId);
   app.post('/subscriptions/cancel-intensive-mentorship', authenticationToken, cancelIntensiveMentorshipSubscription);
   app.post('/subscriptions/activate-intensive-mentorship', authenticationToken, activateIntensiveMentorshipSubscription);
-  app.post('/subscriptions/cleanup-orphaned', authenticationToken, cleanupOrphanedSubscriptions); // Should add admin check
+  app.post('/subscriptions/cleanup-orphaned', authenticationToken, cleanupOrphanedSubscriptions);
+  
+  // Admin routes
+  app.get('/subscriptions/admin/all', authenticationToken, getAllSubscriptionsAdmin);
+  app.delete('/subscriptions/admin/:subscriptionId', authenticationToken, deleteSubscriptionAdmin);
 };
 
 module.exports = subscriptions_route;
