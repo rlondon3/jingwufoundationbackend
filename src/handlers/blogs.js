@@ -375,6 +375,7 @@ const blog_route = (app) => {
     <meta name="twitter:title" content="${safeTitle}" />
     <meta name="twitter:description" content="${safeDescription}" />
     <meta name="twitter:image" content="${safeBannerImage}" />
+    <link rel="canonical" href="${frontendUrl}/blog/${post.slug}" />
 `;
 					html = html.substring(0, headEndIndex) + metaTags + html.substring(headEndIndex);
 				}
