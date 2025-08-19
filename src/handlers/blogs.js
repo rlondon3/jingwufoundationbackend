@@ -1,7 +1,5 @@
 require('dotenv').config();
 const { BlogStore, handleBlogErrors } = require('../models/blog');
-const fs = require('fs');
-const path = require('path');
 
 /**
  * Blog route handler - manages all blog-related endpoints
@@ -322,7 +320,7 @@ const blog_route = (app) => {
 
 	/**
 	 * Meta tag injection for social media sharing
-	 * GET /meta/blog/:slug - serves HTML with proper meta tags for social media crawlers
+	 * GET /api/meta/blog/:slug - serves the blog HTML directly from database with proper meta tags
 	 */
 	const getPostWithMetaTags = async (req, res) => {
 		try {
@@ -335,122 +333,79 @@ const blog_route = (app) => {
 			}
 
 			console.log(`Found post: ${post.title}`);
-			// Always serve HTML with proper meta tags (no bot detection needed with separate URL)
-			// Try to find the React app's built index.html file
-			const possiblePaths = [
-				path.join(__dirname, '../../../jingwufoundation/dist/index.html'),
-				path.join(__dirname, '../../../jingwufoundation/build/index.html'),
-				path.join(__dirname, '../../frontend/dist/index.html'),
-				path.join(__dirname, '../../frontend/build/index.html')
-			];
-
-			let indexPath = null;
-			for (const testPath of possiblePaths) {
-				if (fs.existsSync(testPath)) {
-					indexPath = testPath;
-					break;
-				}
-			}
-
-			if (!indexPath) {
-				console.warn('Could not find React app index.html file for meta tag injection');
-				console.log('Tried paths:', possiblePaths);
-				// Return a basic HTML template with meta tags if we can't find the React build
-				const basicHtml = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>${post.title.replace(/"/g, '&quot;')} - Jing Wu Foundation Blog</title>
-    <meta name="description" content="${(post.meta_description || post.excerpt).replace(/"/g, '&quot;')}" />
-    <meta property="og:title" content="${post.title.replace(/"/g, '&quot;')}" />
-    <meta property="og:description" content="${(post.meta_description || post.excerpt).replace(/"/g, '&quot;')}" />
-    <meta property="og:type" content="article" />
-    <meta property="og:url" content="${req.protocol}://${req.get('host')}/blog/${post.slug}" />
-    ${post.banner_image ? `<meta property="og:image" content="${post.banner_image}" />` : ''}
-    <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="${post.title.replace(/"/g, '&quot;')}" />
-    <meta name="twitter:description" content="${(post.meta_description || post.excerpt).replace(/"/g, '&quot;')}" />
-    ${post.banner_image ? `<meta name="twitter:image" content="${post.banner_image}" />` : ''}
-</head>
-<body>
-    <h1>${post.title}</h1>
-    <p>${post.excerpt}</p>
-    <p><a href="${req.protocol}://${req.get('host')}/blog/${post.slug}">Read full article</a></p>
-</body>
-</html>`;
-				res.setHeader('Content-Type', 'text/html; charset=utf-8');
-				return res.send(basicHtml);
-			}
-
-			// Read the built React app's index.html
-			let html = fs.readFileSync(indexPath, 'utf8');
-
+			
+			// The post.content already contains the full HTML! Just serve it with proper meta tags
+			const frontendUrl = process.env.FRONTEND_URL || 'https://jingwupai.org';
+			
 			// Escape HTML special characters in meta content
 			const escapeHtml = (text) => {
 				if (!text) return '';
-				return text
-					.replace(/&/g, '&amp;')
-					.replace(/</g, '&lt;')
-					.replace(/>/g, '&gt;')
-					.replace(/"/g, '&quot;')
-					.replace(/'/g, '&#039;');
+				return text.replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 			};
 
 			const safeTitle = escapeHtml(post.title);
 			const safeDescription = escapeHtml(post.meta_description || post.excerpt);
 			const safeBannerImage = escapeHtml(post.banner_image || '');
 
-			// Replace the default meta tags with blog-specific ones
-			html = html
-				.replace(
-					/<meta property="og:title" content="[^"]*" \/>/,
-					`<meta property="og:title" content="${safeTitle}" />`
-				)
-				.replace(
-					/<meta property="og:description" content="[^"]*" \/>/,
-					`<meta property="og:description" content="${safeDescription}" />`
-				)
-				.replace(
-					/<meta name="description" content="[^"]*" \/>/,
-					`<meta name="description" content="${safeDescription}" />`
-				)
-				.replace(
-					/<title>[^<]*<\/title>/,
-					`<title>${safeTitle} - Jing Wu Foundation Blog</title>`
-				)
-				.replace(
-					/<meta name="twitter:title" content="[^"]*" \/>/,
-					`<meta name="twitter:title" content="${safeTitle}" />`
-				)
-				.replace(
-					/<meta name="twitter:description" content="[^"]*" \/>/,
-					`<meta name="twitter:description" content="${safeDescription}" />`
-				);
-
-			// Update image meta tags if banner image exists
-			if (post.banner_image) {
-				html = html
-					.replace(
-						/<meta property="og:image" content="[^"]*" \/>/,
-						`<meta property="og:image" content="${safeBannerImage}" />`
-					)
-					.replace(
-						/<meta name="twitter:image" content="[^"]*" \/>/,
-						`<meta name="twitter:image" content="${safeBannerImage}" />`
-					);
+			// Check if the content already has a complete HTML structure
+			if (post.content.includes('<!DOCTYPE html>') || post.content.includes('<html')) {
+				// Content is already complete HTML - just inject/update meta tags if needed
+				let html = post.content;
+				
+				// Add Open Graph and Twitter meta tags to the head if they don't exist
+				const headEndIndex = html.indexOf('</head>');
+				if (headEndIndex !== -1 && post.banner_image) {
+					const metaTags = `
+    <meta property="og:title" content="${safeTitle}" />
+    <meta property="og:description" content="${safeDescription}" />
+    <meta property="og:type" content="article" />
+    <meta property="og:url" content="${frontendUrl}/blog/${post.slug}" />
+    <meta property="og:image" content="${safeBannerImage}" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="${safeTitle}" />
+    <meta name="twitter:description" content="${safeDescription}" />
+    <meta name="twitter:image" content="${safeBannerImage}" />
+`;
+					html = html.substring(0, headEndIndex) + metaTags + html.substring(headEndIndex);
+				}
+				
+				res.setHeader('Content-Type', 'text/html; charset=utf-8');
+				return res.send(html);
+			} else {
+				// Content is HTML fragment - wrap it in a complete HTML document
+				const completeHtml = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${safeTitle} - Jing Wu Foundation Blog</title>
+    <meta name="description" content="${safeDescription}" />
+    <meta property="og:title" content="${safeTitle}" />
+    <meta property="og:description" content="${safeDescription}" />
+    <meta property="og:type" content="article" />
+    <meta property="og:url" content="${frontendUrl}/blog/${post.slug}" />
+    ${post.banner_image ? `<meta property="og:image" content="${safeBannerImage}" />` : ''}
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="${safeTitle}" />
+    <meta name="twitter:description" content="${safeDescription}" />
+    ${post.banner_image ? `<meta name="twitter:image" content="${safeBannerImage}" />` : ''}
+</head>
+<body>
+${post.content}
+</body>
+</html>`;
+				
+				res.setHeader('Content-Type', 'text/html; charset=utf-8');
+				return res.send(completeHtml);
 			}
-
-			// Set proper content type and send the modified HTML
-			res.setHeader('Content-Type', 'text/html; charset=utf-8');
-			res.send(html);
 			
 		} catch (error) {
 			console.error('Meta tag injection error:', error);
 			return res.status(500).json({ error: 'Failed to retrieve blog post' });
 		}
 	};
+
 
 	// Import authentication middleware
 	const { authenticationToken, requireAdmin } = require('../middleware/auth');
