@@ -347,6 +347,16 @@ const blog_route = (app) => {
 			const safeDescription = escapeHtml(post.meta_description || post.excerpt);
 			const safeBannerImage = escapeHtml(post.banner_image || '');
 
+			// For human users (not crawlers), redirect to the frontend app
+			const userAgent = req.get('User-Agent') || '';
+			const isSocialCrawler = /facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|slack|discord|pinterest/i.test(userAgent);
+			
+			if (!isSocialCrawler) {
+				// Redirect human users to the frontend app
+				return res.redirect(301, `${frontendUrl}/blog/${post.slug}`);
+			}
+
+			// For social media crawlers, serve HTML with proper meta tags
 			// Check if the content already has a complete HTML structure
 			if (post.content.includes('<!DOCTYPE html>') || post.content.includes('<html')) {
 				// Content is already complete HTML - just inject/update meta tags if needed
