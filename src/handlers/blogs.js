@@ -327,10 +327,14 @@ const blog_route = (app) => {
 	const getPostWithMetaTags = async (req, res) => {
 		try {
 			const post = await store.getBySlug(req.params.slug);
+			console.log(`Meta tag injection request for slug: ${req.params.slug}`);
+			
 			if (!post) {
+				console.log(`Post not found for slug: ${req.params.slug}`);
 				return res.status(404).json({ error: 'Blog post not found' });
 			}
 
+			console.log(`Found post: ${post.title}`);
 			// Always serve HTML with proper meta tags (no bot detection needed with separate URL)
 			// Try to find the React app's built index.html file
 			const possiblePaths = [
@@ -350,6 +354,7 @@ const blog_route = (app) => {
 
 			if (!indexPath) {
 				console.warn('Could not find React app index.html file for meta tag injection');
+				console.log('Tried paths:', possiblePaths);
 				// Return a basic HTML template with meta tags if we can't find the React build
 				const basicHtml = `
 <!DOCTYPE html>
@@ -471,7 +476,7 @@ const blog_route = (app) => {
 	// Public routes
 	app.get('/blog/posts', getPublishedPosts);
 	app.get('/blog/post/:slug', getBySlug);
-	app.get('/meta/blog/:slug', getPostWithMetaTags); // Meta tag injection for social media sharing
+	app.get('/api/meta/blog/:slug', getPostWithMetaTags); // Meta tag injection for social media sharing
 	app.get('/blog/tags', getAllTags);
 	app.get('/blog/tag/:tagName', getPostsByTag);
 	app.get('/blog/search', searchPosts);
