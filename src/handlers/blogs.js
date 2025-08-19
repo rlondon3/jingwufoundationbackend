@@ -322,7 +322,7 @@ const blog_route = (app) => {
 
 	/**
 	 * Meta tag injection for social media sharing
-	 * GET /blog/:slug - serves HTML with proper meta tags for social media crawlers
+	 * GET /meta/blog/:slug - serves HTML with proper meta tags for social media crawlers
 	 */
 	const getPostWithMetaTags = async (req, res) => {
 		try {
@@ -331,16 +331,7 @@ const blog_route = (app) => {
 				return res.status(404).json({ error: 'Blog post not found' });
 			}
 
-			// Detect if this is likely a social media crawler
-			const userAgent = req.get('User-Agent') || '';
-			const isBot = /facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|slackbot|discordbot/i.test(userAgent);
-			
-			// If not a bot, return JSON for API usage
-			if (!isBot) {
-				return res.status(200).json(post);
-			}
-
-			// For bots/crawlers, serve HTML with proper meta tags
+			// Always serve HTML with proper meta tags (no bot detection needed with separate URL)
 			// Try to find the React app's built index.html file
 			const possiblePaths = [
 				path.join(__dirname, '../../../jingwufoundation/dist/index.html'),
@@ -359,8 +350,33 @@ const blog_route = (app) => {
 
 			if (!indexPath) {
 				console.warn('Could not find React app index.html file for meta tag injection');
-				// Return JSON response instead of HTML if we can't find the file
-				return res.status(200).json(post);
+				// Return a basic HTML template with meta tags if we can't find the React build
+				const basicHtml = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${post.title.replace(/"/g, '&quot;')} - Jing Wu Foundation Blog</title>
+    <meta name="description" content="${(post.meta_description || post.excerpt).replace(/"/g, '&quot;')}" />
+    <meta property="og:title" content="${post.title.replace(/"/g, '&quot;')}" />
+    <meta property="og:description" content="${(post.meta_description || post.excerpt).replace(/"/g, '&quot;')}" />
+    <meta property="og:type" content="article" />
+    <meta property="og:url" content="${req.protocol}://${req.get('host')}/blog/${post.slug}" />
+    ${post.banner_image ? `<meta property="og:image" content="${post.banner_image}" />` : ''}
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="${post.title.replace(/"/g, '&quot;')}" />
+    <meta name="twitter:description" content="${(post.meta_description || post.excerpt).replace(/"/g, '&quot;')}" />
+    ${post.banner_image ? `<meta name="twitter:image" content="${post.banner_image}" />` : ''}
+</head>
+<body>
+    <h1>${post.title}</h1>
+    <p>${post.excerpt}</p>
+    <p><a href="${req.protocol}://${req.get('host')}/blog/${post.slug}">Read full article</a></p>
+</body>
+</html>`;
+				res.setHeader('Content-Type', 'text/html; charset=utf-8');
+				return res.send(basicHtml);
 			}
 
 			// Read the built React app's index.html
@@ -455,7 +471,7 @@ const blog_route = (app) => {
 	// Public routes
 	app.get('/blog/posts', getPublishedPosts);
 	app.get('/blog/post/:slug', getBySlug);
-	app.get('/blog/:slug', getPostWithMetaTags); // Meta tag injection for social media sharing
+	app.get('/meta/blog/:slug', getPostWithMetaTags); // Meta tag injection for social media sharing
 	app.get('/blog/tags', getAllTags);
 	app.get('/blog/tag/:tagName', getPostsByTag);
 	app.get('/blog/search', searchPosts);
