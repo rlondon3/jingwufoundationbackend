@@ -266,6 +266,7 @@ class UserStore {
 					u.username,
 					u.email,
 					u.avatar as user_avatar,
+					u.last_login,
 					c.title as course_title,
 					c.description as course_description
 				FROM user_courses uc
@@ -514,8 +515,13 @@ class UserStore {
 					user.password
 				);
 				if (isValid) {
+					// Update last_login timestamp on successful authentication
+					const updateSql = 'UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *';
+					const updateRes = await client.query(updateSql, [user.id]);
 					client.release();
-					return user;
+					
+					// Return user with updated last_login
+					return updateRes.rows[0];
 				}
 			} else {
 				client.release();
