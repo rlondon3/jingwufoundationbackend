@@ -66,6 +66,33 @@ const getBookingByGuid = async (req, res) => {
 };
 
 /**
+ * Check if user has existing free class booking (public)
+ * POST /bookings/check-free-class
+ */
+const checkFreeClassExists = async (req, res) => {
+	try {
+		const { email } = req.body;
+		
+		if (!email) {
+			return res.status(400).json({ error: 'Email is required' });
+		}
+
+		const store = new BookingsStore(req.app.locals.pool);
+		const bookings = await store.getBookingsByEmail(email);
+		
+		const hasFreeClass = bookings.some(booking => 
+			booking.appointment_type === 'free_class' && 
+			booking.status !== 'cancelled'
+		);
+
+		return res.status(200).json({ hasFreeClass });
+	} catch (error) {
+		console.error('Check free class exists error:', error);
+		return res.status(500).json({ error: 'Failed to check free class' });
+	}
+};
+
+/**
  * Get available time slots for a date (public)
  * GET /bookings/availability/:date?duration=60
  */
@@ -508,6 +535,7 @@ const getUpcomingBookings = async (req, res) => {
 const bookings_route = (app) => {
 	// Public routes (no authentication required)
 	app.post('/bookings', createBooking);
+	app.post('/bookings/check-free-class', checkFreeClassExists);
 	app.get('/bookings/calendar', getBookingsForCalendar);
 	app.get('/bookings/availability/:date', getAvailableTimeSlots);
 	app.get('/bookings/email/:email', getBookingsByEmail);
