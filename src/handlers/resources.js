@@ -549,6 +549,156 @@ const uploadImage = async (req, res) => {
 	}
 };
 
+// ========================
+// META TAG INJECTION FOR SOCIAL MEDIA SHARING
+// ========================
+
+/**
+ * Get resource with meta tags for social media sharing
+ * GET /api/meta/resource/:id
+ */
+const getResourceWithMetaTags = async (req, res) => {
+	try {
+		const resourceId = parseInt(req.params.id);
+		const store = new ResourceStore(req.app.locals.pool);
+
+		// Fetch resource without user context (no access control for meta tags)
+		const resource = await store.show(resourceId, null);
+
+		console.log(`Meta tag injection request for resource ID: ${resourceId}`);
+
+		if (!resource) {
+			console.log(`Resource not found for ID: ${resourceId}`);
+			return res.status(404).json({ error: 'Resource not found' });
+		}
+
+		// Only serve published resources
+		if (!resource.is_published) {
+			return res.status(404).json({ error: 'Resource not found' });
+		}
+
+		console.log(`Found resource: ${resource.title}`);
+
+		const frontendUrl = process.env.FRONTEND_URL || 'https://jingwupai.org';
+
+		// Escape HTML special characters in meta content
+		const escapeHtml = (text) => {
+			if (!text) return '';
+			return text
+				.replace(/&/g, '&amp;')
+				.replace(/</g, '&lt;')
+				.replace(/>/g, '&gt;')
+				.replace(/"/g, '&quot;')
+				.replace(/'/g, '&#039;');
+		};
+
+		const safeTitle = escapeHtml(resource.title);
+		const safeAuthor = escapeHtml(resource.author);
+
+		// Build description with fallback logic
+		let description = resource.description;
+		if (!description || description.trim() === '') {
+			description = `${resource.title} by ${resource.author} - Premium martial arts resource`;
+		}
+		const safeDescription = escapeHtml(description);
+
+		// Handle thumbnail with fallback to logo
+		const logoUrl =
+			'https://res.cloudinary.com/dvao1isqe/image/upload/v1753240648/logo_s8xpbi.png';
+		const safeThumbnail = escapeHtml(resource.thumbnail || logoUrl);
+
+		// Detect social media crawlers
+		const userAgent = req.get('User-Agent') || '';
+		const isSocialCrawler =
+			/facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|slack|discord|pinterest/i.test(
+				userAgent
+			);
+
+		// For human users, redirect to the frontend app
+		if (!isSocialCrawler) {
+			return res.redirect(
+				301,
+				`${frontendUrl}/shop/resource/${resource.id}`
+			);
+		}
+
+		// For social media crawlers, serve HTML with proper meta tags
+		const resourceType = resource.type; // blog, video, audio, manual, pdf
+		const ogType =
+			resourceType === 'video'
+				? 'video.other'
+				: resourceType === 'audio'
+					? 'music.song'
+					: resource.is_add_on
+						? 'product'
+						: 'article';
+
+		// Build price meta tags for add-ons
+		const priceTags =
+			resource.is_add_on && resource.price
+				? `
+    <meta property="product:price:amount" content="${resource.price}" />
+    <meta property="product:price:currency" content="USD" />
+    <meta property="og:availability" content="instock" />`
+				: '';
+
+		const completeHtml = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${safeTitle} - Jing Wu Foundation</title>
+    <meta name="description" content="${safeDescription}" />
+
+    <!-- Open Graph Meta Tags -->
+    <meta property="og:title" content="${safeTitle}" />
+    <meta property="og:description" content="${safeDescription}" />
+    <meta property="og:type" content="${ogType}" />
+    <meta property="og:url" content="${frontendUrl}/shop/resource/${resource.id}" />
+    <meta property="og:image" content="${safeThumbnail}" />
+    <meta property="og:site_name" content="Jing Wu Foundation" />${priceTags}
+
+    <!-- Twitter Card Meta Tags -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="${safeTitle}" />
+    <meta name="twitter:description" content="${safeDescription}" />
+    <meta name="twitter:image" content="${safeThumbnail}" />
+
+    <!-- Additional Meta Tags -->
+    <meta name="author" content="${safeAuthor}" />
+    <meta name="resource-type" content="${resource.type}" />
+    <link rel="canonical" href="${frontendUrl}/shop/resource/${resource.id}" />
+
+    <!-- Redirect after 0 seconds to frontend (for crawlers that follow meta refresh) -->
+    <meta http-equiv="refresh" content="0;url=${frontendUrl}/shop/resource/${resource.id}">
+</head>
+<body>
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px;">
+        <img src="${safeThumbnail}" alt="${safeTitle}" style="width: 100%; max-width: 400px; height: auto; border-radius: 8px; margin-bottom: 20px;" />
+        <h1>${safeTitle}</h1>
+        <p><strong>By:</strong> ${safeAuthor}</p>
+        <p>${safeDescription}</p>${
+			resource.is_add_on && resource.price
+				? `
+        <p><strong>Price:</strong> $${resource.price} USD</p>`
+				: ''
+		}
+        <p><a href="${frontendUrl}/shop/resource/${resource.id}">View on Jing Wu Foundation</a></p>
+    </div>
+</body>
+</html>`;
+
+		res.setHeader('Content-Type', 'text/html; charset=utf-8');
+		res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
+		res.setHeader('X-Content-Type-Options', 'nosniff');
+		return res.send(completeHtml);
+	} catch (error) {
+		console.error('Meta tag injection error:', error);
+		return res.status(500).json({ error: 'Failed to retrieve resource' });
+	}
+};
+
 /**
  * Resource route handler - manages all resource-related endpoints
  * Updated to include add-on endpoints and access control
@@ -610,6 +760,9 @@ const resources_route = (app) => {
 
 	app.get('/resources/author/:author', getByAuthor);
 	app.get('/resources/course/:courseId', getByCourse);
+
+	// Meta tag endpoint for social sharing (must come before /resources/:id)
+	app.get('/api/meta/resource/:id', getResourceWithMetaTags);
 
 	// Resource detail with access control
 	app.get(
