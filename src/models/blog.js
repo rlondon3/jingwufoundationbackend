@@ -447,7 +447,7 @@ class BlogStore {
 function handleBlogErrors(post) {
 	const blogSchema = Joi.object({
 		title: Joi.string().min(1).max(200).required(),
-		content: Joi.string().required(),
+		content: Joi.string().max(31457280).required(),
 		excerpt: Joi.string().max(500).required(),
 		author: Joi.string().default('Jing Wu Foundation'),
 		banner_image: Joi.string().uri().allow(''),

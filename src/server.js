@@ -139,8 +139,8 @@ app.use((req, res, next) => {
 
 app.use('/stripe/webhook', express.raw({ type: 'application/json' }));
 app.use('/paypal/webhook', express.raw({ type: 'application/json' }));
-app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
+app.use(express.urlencoded({ extended: false, limit: '30mb' }));
+app.use(express.json({ limit: '30mb' }));
 
 // Main route
 app.get('/', function (_req, res) {
