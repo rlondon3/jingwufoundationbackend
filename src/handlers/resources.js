@@ -653,9 +653,6 @@ const resources_route = (app) => {
     <meta name="author" content="${safeAuthor}" />
     <meta name="resource-type" content="${resource.type}" />
     <link rel="canonical" href="${frontendUrl}/shop/resource/${resource.id}" />
-
-    <!-- Redirect after 0 seconds to frontend (for crawlers that follow meta refresh) -->
-    <meta http-equiv="refresh" content="0;url=${frontendUrl}/shop/resource/${resource.id}">
 </head>
 <body>
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px;">
