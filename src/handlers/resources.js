@@ -22,6 +22,7 @@ const {
  */
 const index = async (req, res) => {
 	try {
+		const store = new ResourceStore(req.app.locals.pool);
 		const userId = req.user?.id || null;
 		const resources = await store.index(userId);
 		return res.status(200).json(resources);
@@ -37,6 +38,7 @@ const index = async (req, res) => {
  */
 const show = async (req, res) => {
 	try {
+		const store = new ResourceStore(req.app.locals.pool);
 		const userId = req.user?.id || null;
 		const resource = await store.show(parseInt(req.params.id), userId);
 
@@ -100,6 +102,7 @@ const getByType = async (req, res) => {
 			return res.status(400).json({ error: 'Invalid resource type' });
 		}
 
+		const store = new ResourceStore(req.app.locals.pool);
 		const userId = req.user?.id || null;
 		const resources = await store.getByType(type, userId);
 		return res.status(200).json(resources);
@@ -117,6 +120,7 @@ const getByType = async (req, res) => {
  */
 const getByAuthor = async (req, res) => {
 	try {
+		const store = new ResourceStore(req.app.locals.pool);
 		const author = req.params.author;
 		const resources = await store.getByAuthor(author);
 		return res.status(200).json(resources);
@@ -146,6 +150,7 @@ const search = async (req, res) => {
 				.json({ error: 'Search term must be at least 2 characters' });
 		}
 
+		const store = new ResourceStore(req.app.locals.pool);
 		const userId = req.user?.id || null;
 		const resources = await store.search(searchTerm, userId);
 		return res.status(200).json(resources);
@@ -161,6 +166,7 @@ const search = async (req, res) => {
  */
 const getByCourse = async (req, res) => {
 	try {
+		const store = new ResourceStore(req.app.locals.pool);
 		const courseId = parseInt(req.params.courseId);
 		const resources = await store.getByCourse(courseId);
 		return res.status(200).json(resources);
@@ -178,6 +184,7 @@ const getByCourse = async (req, res) => {
  */
 const getAuthors = async (req, res) => {
 	try {
+		const store = new ResourceStore(req.app.locals.pool);
 		const authors = await store.getAuthors();
 		return res.status(200).json(authors);
 	} catch (error) {
@@ -196,6 +203,7 @@ const getAuthors = async (req, res) => {
  */
 const getAddOns = async (req, res) => {
 	try {
+		const store = new ResourceStore(req.app.locals.pool);
 		const userId = req.user?.id || null;
 		const addOns = await store.getAddOns(userId);
 		return res.status(200).json(addOns);
@@ -211,6 +219,7 @@ const getAddOns = async (req, res) => {
  */
 const checkUserAddOnAccess = async (req, res) => {
 	try {
+		const store = new ResourceStore(req.app.locals.pool);
 		const userId = parseInt(req.params.userId);
 		const resourceId = parseInt(req.params.resourceId);
 
@@ -229,6 +238,7 @@ const checkUserAddOnAccess = async (req, res) => {
  */
 const getUserPurchasedAddOns = async (req, res) => {
 	try {
+		const store = new ResourceStore(req.app.locals.pool);
 		const userId = parseInt(req.params.userId);
 
 		const addOns = await store.getUserPurchasedAddOns(userId);
@@ -248,6 +258,7 @@ const getUserPurchasedAddOns = async (req, res) => {
  */
 const getUserAccessibleResources = async (req, res) => {
 	try {
+		const store = new ResourceStore(req.app.locals.pool);
 		const userId = parseInt(req.params.userId);
 
 		const resources = await store.getUserAccessibleResources(userId);
@@ -271,6 +282,7 @@ const getUserAccessibleResources = async (req, res) => {
  */
 const adminIndex = async (req, res) => {
 	try {
+		const store = new ResourceStore(req.app.locals.pool);
 		const resources = await store.adminIndex();
 		return res.status(200).json(resources);
 	} catch (error) {
@@ -291,6 +303,7 @@ const create = async (req, res) => {
 			return res.status(400).json({ error: error.details[0].message });
 		}
 
+		const store = new ResourceStore(req.app.locals.pool);
 		const resource = await store.create(req.body);
 
 		return res.status(201).json(resource);
@@ -312,6 +325,7 @@ const update = async (req, res) => {
 			return res.status(400).json({ error: error.details[0].message });
 		}
 
+		const store = new ResourceStore(req.app.locals.pool);
 
 		// Get current resource for Cloudinary cleanup
 		const currentResource = await store.show(parseInt(req.params.id));
@@ -378,6 +392,7 @@ const update = async (req, res) => {
  */
 const deleteResource = async (req, res) => {
 	try {
+		const store = new ResourceStore(req.app.locals.pool);
 
 		// Get resource details before deletion for Cloudinary cleanup
 		const resourceToDelete = await store.show(parseInt(req.params.id));
@@ -435,6 +450,7 @@ const deleteResource = async (req, res) => {
  */
 const getStats = async (req, res) => {
 	try {
+		const store = new ResourceStore(req.app.locals.pool);
 		const stats = await store.getStats();
 		return res.status(200).json(stats);
 	} catch (error) {
