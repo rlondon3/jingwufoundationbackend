@@ -22,7 +22,6 @@ const {
  */
 const index = async (req, res) => {
 	try {
-		const store = new ResourceStore(req.app.locals.pool);
 		const userId = req.user?.id || null;
 		const resources = await store.index(userId);
 		return res.status(200).json(resources);
@@ -38,7 +37,6 @@ const index = async (req, res) => {
  */
 const show = async (req, res) => {
 	try {
-		const store = new ResourceStore(req.app.locals.pool);
 		const userId = req.user?.id || null;
 		const resource = await store.show(parseInt(req.params.id), userId);
 
@@ -102,7 +100,6 @@ const getByType = async (req, res) => {
 			return res.status(400).json({ error: 'Invalid resource type' });
 		}
 
-		const store = new ResourceStore(req.app.locals.pool);
 		const userId = req.user?.id || null;
 		const resources = await store.getByType(type, userId);
 		return res.status(200).json(resources);
@@ -121,7 +118,6 @@ const getByType = async (req, res) => {
 const getByAuthor = async (req, res) => {
 	try {
 		const author = req.params.author;
-		const store = new ResourceStore(req.app.locals.pool);
 		const resources = await store.getByAuthor(author);
 		return res.status(200).json(resources);
 	} catch (error) {
@@ -150,7 +146,6 @@ const search = async (req, res) => {
 				.json({ error: 'Search term must be at least 2 characters' });
 		}
 
-		const store = new ResourceStore(req.app.locals.pool);
 		const userId = req.user?.id || null;
 		const resources = await store.search(searchTerm, userId);
 		return res.status(200).json(resources);
@@ -167,7 +162,6 @@ const search = async (req, res) => {
 const getByCourse = async (req, res) => {
 	try {
 		const courseId = parseInt(req.params.courseId);
-		const store = new ResourceStore(req.app.locals.pool);
 		const resources = await store.getByCourse(courseId);
 		return res.status(200).json(resources);
 	} catch (error) {
@@ -184,7 +178,6 @@ const getByCourse = async (req, res) => {
  */
 const getAuthors = async (req, res) => {
 	try {
-		const store = new ResourceStore(req.app.locals.pool);
 		const authors = await store.getAuthors();
 		return res.status(200).json(authors);
 	} catch (error) {
@@ -203,7 +196,6 @@ const getAuthors = async (req, res) => {
  */
 const getAddOns = async (req, res) => {
 	try {
-		const store = new ResourceStore(req.app.locals.pool);
 		const userId = req.user?.id || null;
 		const addOns = await store.getAddOns(userId);
 		return res.status(200).json(addOns);
@@ -222,7 +214,6 @@ const checkUserAddOnAccess = async (req, res) => {
 		const userId = parseInt(req.params.userId);
 		const resourceId = parseInt(req.params.resourceId);
 
-		const store = new ResourceStore(req.app.locals.pool);
 		const hasAccess = await store.hasUserPurchasedAddOn(userId, resourceId);
 
 		return res.status(200).json({ has_access: hasAccess });
@@ -240,7 +231,6 @@ const getUserPurchasedAddOns = async (req, res) => {
 	try {
 		const userId = parseInt(req.params.userId);
 
-		const store = new ResourceStore(req.app.locals.pool);
 		const addOns = await store.getUserPurchasedAddOns(userId);
 
 		return res.status(200).json(addOns);
@@ -260,7 +250,6 @@ const getUserAccessibleResources = async (req, res) => {
 	try {
 		const userId = parseInt(req.params.userId);
 
-		const store = new ResourceStore(req.app.locals.pool);
 		const resources = await store.getUserAccessibleResources(userId);
 
 		return res.status(200).json(resources);
@@ -282,7 +271,6 @@ const getUserAccessibleResources = async (req, res) => {
  */
 const adminIndex = async (req, res) => {
 	try {
-		const store = new ResourceStore(req.app.locals.pool);
 		const resources = await store.adminIndex();
 		return res.status(200).json(resources);
 	} catch (error) {
@@ -303,7 +291,6 @@ const create = async (req, res) => {
 			return res.status(400).json({ error: error.details[0].message });
 		}
 
-		const store = new ResourceStore(req.app.locals.pool);
 		const resource = await store.create(req.body);
 
 		return res.status(201).json(resource);
@@ -325,7 +312,6 @@ const update = async (req, res) => {
 			return res.status(400).json({ error: error.details[0].message });
 		}
 
-		const store = new ResourceStore(req.app.locals.pool);
 
 		// Get current resource for Cloudinary cleanup
 		const currentResource = await store.show(parseInt(req.params.id));
@@ -392,7 +378,6 @@ const update = async (req, res) => {
  */
 const deleteResource = async (req, res) => {
 	try {
-		const store = new ResourceStore(req.app.locals.pool);
 
 		// Get resource details before deletion for Cloudinary cleanup
 		const resourceToDelete = await store.show(parseInt(req.params.id));
@@ -450,7 +435,6 @@ const deleteResource = async (req, res) => {
  */
 const getStats = async (req, res) => {
 	try {
-		const store = new ResourceStore(req.app.locals.pool);
 		const stats = await store.getStats();
 		return res.status(200).json(stats);
 	} catch (error) {
@@ -549,100 +533,103 @@ const uploadImage = async (req, res) => {
 	}
 };
 
-// ========================
-// META TAG INJECTION FOR SOCIAL MEDIA SHARING
-// ========================
-
 /**
- * Get resource with meta tags for social media sharing
- * GET /api/meta/resource/:id
+ * Resource route handler - manages all resource-related endpoints
+ * Updated to include add-on endpoints and access control
  */
-const getResourceWithMetaTags = async (req, res) => {
-	try {
-		const resourceId = parseInt(req.params.id);
-		const store = new ResourceStore(req.app.locals.pool);
+const resources_route = (app) => {
+	const pool = app.locals.pool;
+	const store = new ResourceStore(pool);
 
-		// Fetch resource without user context (no access control for meta tags)
-		const resource = await store.show(resourceId, null);
+	/**
+	 * Get resource with meta tags for social media sharing
+	 * GET /api/meta/resource/:id
+	 */
+	const getResourceWithMetaTags = async (req, res) => {
+		try {
+			const resourceId = parseInt(req.params.id);
 
-		console.log(`Meta tag injection request for resource ID: ${resourceId}`);
+			// Fetch resource without user context (no access control for meta tags)
+			const resource = await store.show(resourceId, null);
 
-		if (!resource) {
-			console.log(`Resource not found for ID: ${resourceId}`);
-			return res.status(404).json({ error: 'Resource not found' });
-		}
+			console.log(`Meta tag injection request for resource ID: ${resourceId}`);
 
-		// Only serve published resources
-		if (!resource.is_published) {
-			return res.status(404).json({ error: 'Resource not found' });
-		}
+			if (!resource) {
+				console.log(`Resource not found for ID: ${resourceId}`);
+				return res.status(404).json({ error: 'Resource not found' });
+			}
 
-		console.log(`Found resource: ${resource.title}`);
+			// Only serve published resources
+			if (!resource.is_published) {
+				return res.status(404).json({ error: 'Resource not found' });
+			}
 
-		const frontendUrl = process.env.FRONTEND_URL || 'https://jingwupai.org';
+			console.log(`Found resource: ${resource.title}`);
 
-		// Escape HTML special characters in meta content
-		const escapeHtml = (text) => {
-			if (!text) return '';
-			return text
-				.replace(/&/g, '&amp;')
-				.replace(/</g, '&lt;')
-				.replace(/>/g, '&gt;')
-				.replace(/"/g, '&quot;')
-				.replace(/'/g, '&#039;');
-		};
+			const frontendUrl = process.env.FRONTEND_URL || 'https://jingwupai.org';
 
-		const safeTitle = escapeHtml(resource.title);
-		const safeAuthor = escapeHtml(resource.author);
+			// Escape HTML special characters in meta content
+			const escapeHtml = (text) => {
+				if (!text) return '';
+				return text
+					.replace(/&/g, '&amp;')
+					.replace(/</g, '&lt;')
+					.replace(/>/g, '&gt;')
+					.replace(/"/g, '&quot;')
+					.replace(/'/g, '&#039;');
+			};
 
-		// Build description with fallback logic
-		let description = resource.description;
-		if (!description || description.trim() === '') {
-			description = `${resource.title} by ${resource.author} - Premium martial arts resource`;
-		}
-		const safeDescription = escapeHtml(description);
+			const safeTitle = escapeHtml(resource.title);
+			const safeAuthor = escapeHtml(resource.author);
 
-		// Handle thumbnail with fallback to logo
-		const logoUrl =
-			'https://res.cloudinary.com/dvao1isqe/image/upload/v1753240648/logo_s8xpbi.png';
-		const safeThumbnail = escapeHtml(resource.thumbnail || logoUrl);
+			// Build description with fallback logic
+			let description = resource.description;
+			if (!description || description.trim() === '') {
+				description = `${resource.title} by ${resource.author} - Premium martial arts resource`;
+			}
+			const safeDescription = escapeHtml(description);
 
-		// Detect social media crawlers
-		const userAgent = req.get('User-Agent') || '';
-		const isSocialCrawler =
-			/facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|slack|discord|pinterest/i.test(
-				userAgent
-			);
+			// Handle thumbnail with fallback to logo
+			const logoUrl =
+				'https://res.cloudinary.com/dvao1isqe/image/upload/v1753240648/logo_s8xpbi.png';
+			const safeThumbnail = escapeHtml(resource.thumbnail || logoUrl);
 
-		// For human users, redirect to the frontend app
-		if (!isSocialCrawler) {
-			return res.redirect(
-				301,
-				`${frontendUrl}/shop/resource/${resource.id}`
-			);
-		}
+			// Detect social media crawlers
+			const userAgent = req.get('User-Agent') || '';
+			const isSocialCrawler =
+				/facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|slack|discord|pinterest/i.test(
+					userAgent
+				);
 
-		// For social media crawlers, serve HTML with proper meta tags
-		const resourceType = resource.type; // blog, video, audio, manual, pdf
-		const ogType =
-			resourceType === 'video'
-				? 'video.other'
-				: resourceType === 'audio'
-					? 'music.song'
-					: resource.is_add_on
-						? 'product'
-						: 'article';
+			// For human users, redirect to the frontend app
+			if (!isSocialCrawler) {
+				return res.redirect(
+					301,
+					`${frontendUrl}/shop/resource/${resource.id}`
+				);
+			}
 
-		// Build price meta tags for add-ons
-		const priceTags =
-			resource.is_add_on && resource.price
-				? `
+			// For social media crawlers, serve HTML with proper meta tags
+			const resourceType = resource.type; // blog, video, audio, manual, pdf
+			const ogType =
+				resourceType === 'video'
+					? 'video.other'
+					: resourceType === 'audio'
+						? 'music.song'
+						: resource.is_add_on
+							? 'product'
+							: 'article';
+
+			// Build price meta tags for add-ons
+			const priceTags =
+				resource.is_add_on && resource.price
+					? `
     <meta property="product:price:amount" content="${resource.price}" />
     <meta property="product:price:currency" content="USD" />
     <meta property="og:availability" content="instock" />`
-				: '';
+					: '';
 
-		const completeHtml = `
+			const completeHtml = `
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -679,31 +666,26 @@ const getResourceWithMetaTags = async (req, res) => {
         <h1>${safeTitle}</h1>
         <p><strong>By:</strong> ${safeAuthor}</p>
         <p>${safeDescription}</p>${
-			resource.is_add_on && resource.price
-				? `
+				resource.is_add_on && resource.price
+					? `
         <p><strong>Price:</strong> $${resource.price} USD</p>`
-				: ''
-		}
+					: ''
+			}
         <p><a href="${frontendUrl}/shop/resource/${resource.id}">View on Jing Wu Foundation</a></p>
     </div>
 </body>
 </html>`;
 
-		res.setHeader('Content-Type', 'text/html; charset=utf-8');
-		res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
-		res.setHeader('X-Content-Type-Options', 'nosniff');
-		return res.send(completeHtml);
-	} catch (error) {
-		console.error('Meta tag injection error:', error);
-		return res.status(500).json({ error: 'Failed to retrieve resource' });
-	}
-};
+			res.setHeader('Content-Type', 'text/html; charset=utf-8');
+			res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
+			res.setHeader('X-Content-Type-Options', 'nosniff');
+			return res.send(completeHtml);
+		} catch (error) {
+			console.error('Meta tag injection error:', error);
+			return res.status(500).json({ error: 'Failed to retrieve resource' });
+		}
+	};
 
-/**
- * Resource route handler - manages all resource-related endpoints
- * Updated to include add-on endpoints and access control
- */
-const resources_route = (app) => {
 	// Public routes with optional authentication for purchase status
 	app.get(
 		'/resources',
