@@ -8,554 +8,535 @@ const {
 } = require('../middleware/auth');
 
 /**
- * Resource Handlers - All business logic for resource operations
- * Updated to support add-on purchases and access control
- */
-
-// ========================
-// PUBLIC RESOURCE HANDLERS (Updated)
-// ========================
-
-/**
- * Get all published resources with purchase status for authenticated users
- * GET /resources
- */
-const index = async (req, res) => {
-	try {
-		const store = new ResourceStore(req.app.locals.pool);
-		const userId = req.user?.id || null;
-		const resources = await store.index(userId);
-		return res.status(200).json(resources);
-	} catch (error) {
-		console.error('Get resources error:', error);
-		return res.status(500).json({ error: 'Failed to retrieve resources' });
-	}
-};
-
-/**
- * Get single resource by ID with access control for add-ons
- * GET /resources/:id
- */
-const show = async (req, res) => {
-	try {
-		const store = new ResourceStore(req.app.locals.pool);
-		const userId = req.user?.id || null;
-		const resource = await store.show(parseInt(req.params.id), userId);
-
-		if (!resource) {
-			return res.status(404).json({ error: 'Resource not found' });
-		}
-
-		// Only show published resources to non-admin users
-		if (!resource.is_published && !req.user?.is_admin) {
-			return res.status(404).json({ error: 'Resource not found' });
-		}
-
-		// Check access for add-on resources
-		if (resource.is_add_on && !req.user?.is_admin) {
-			if (!userId) {
-				// Return limited info for unauthenticated users
-				return res.status(200).json({
-					...resource,
-					content: null,
-					video_url: null,
-					audio_url: null,
-					user_has_access: false,
-					access_required: true,
-					message:
-						'This is a premium add-on. Please sign in and purchase to access full content.',
-				});
-			}
-
-			// Check if user has purchased this add-on
-			const hasAccess = resource.user_has_access;
-			if (!hasAccess) {
-				return res.status(200).json({
-					...resource,
-					content: null,
-					video_url: null,
-					audio_url: null,
-					user_has_access: false,
-					access_required: true,
-					message:
-						'This is a premium add-on. Purchase required to access full content.',
-				});
-			}
-		}
-
-		return res.status(200).json(resource);
-	} catch (error) {
-		console.error('Get resource error:', error);
-		return res.status(500).json({ error: 'Failed to retrieve resource' });
-	}
-};
-
-/**
- * Get resources by type with purchase status
- * GET /resources/type/:type
- */
-const getByType = async (req, res) => {
-	try {
-		const type = req.params.type;
-
-		if (!['blog', 'video', 'audio', 'manual'].includes(type)) {
-			return res.status(400).json({ error: 'Invalid resource type' });
-		}
-
-		const store = new ResourceStore(req.app.locals.pool);
-		const userId = req.user?.id || null;
-		const resources = await store.getByType(type, userId);
-		return res.status(200).json(resources);
-	} catch (error) {
-		console.error('Get resources by type error:', error);
-		return res
-			.status(500)
-			.json({ error: 'Failed to retrieve resources by type' });
-	}
-};
-
-/**
- * Get resources by author (unchanged)
- * GET /resources/author/:author
- */
-const getByAuthor = async (req, res) => {
-	try {
-		const store = new ResourceStore(req.app.locals.pool);
-		const author = req.params.author;
-		const resources = await store.getByAuthor(author);
-		return res.status(200).json(resources);
-	} catch (error) {
-		console.error('Get resources by author error:', error);
-		return res
-			.status(500)
-			.json({ error: 'Failed to retrieve resources by author' });
-	}
-};
-
-/**
- * Search resources with purchase status
- * GET /resources/search?q=searchTerm
- */
-const search = async (req, res) => {
-	try {
-		const searchTerm = req.query.q;
-
-		if (!searchTerm) {
-			return res.status(400).json({ error: 'Search term is required' });
-		}
-
-		if (searchTerm.length < 2) {
-			return res
-				.status(400)
-				.json({ error: 'Search term must be at least 2 characters' });
-		}
-
-		const store = new ResourceStore(req.app.locals.pool);
-		const userId = req.user?.id || null;
-		const resources = await store.search(searchTerm, userId);
-		return res.status(200).json(resources);
-	} catch (error) {
-		console.error('Search resources error:', error);
-		return res.status(500).json({ error: 'Failed to search resources' });
-	}
-};
-
-/**
- * Get resources by course (unchanged)
- * GET /resources/course/:courseId
- */
-const getByCourse = async (req, res) => {
-	try {
-		const store = new ResourceStore(req.app.locals.pool);
-		const courseId = parseInt(req.params.courseId);
-		const resources = await store.getByCourse(courseId);
-		return res.status(200).json(resources);
-	} catch (error) {
-		console.error('Get resources by course error:', error);
-		return res
-			.status(500)
-			.json({ error: 'Failed to retrieve resources by course' });
-	}
-};
-
-/**
- * Get all authors (unchanged)
- * GET /resources/authors
- */
-const getAuthors = async (req, res) => {
-	try {
-		const store = new ResourceStore(req.app.locals.pool);
-		const authors = await store.getAuthors();
-		return res.status(200).json(authors);
-	} catch (error) {
-		console.error('Get authors error:', error);
-		return res.status(500).json({ error: 'Failed to retrieve authors' });
-	}
-};
-
-// ========================
-// ADD-ON SPECIFIC HANDLERS
-// ========================
-
-/**
- * Get all available add-ons with purchase status
- * GET /resources/addons
- */
-const getAddOns = async (req, res) => {
-	try {
-		const store = new ResourceStore(req.app.locals.pool);
-		const userId = req.user?.id || null;
-		const addOns = await store.getAddOns(userId);
-		return res.status(200).json(addOns);
-	} catch (error) {
-		console.error('Get add-ons error:', error);
-		return res.status(500).json({ error: 'Failed to retrieve add-ons' });
-	}
-};
-
-/**
- * Check if user has purchased specific add-on
- * GET /users/:userId/resources/:resourceId/access
- */
-const checkUserAddOnAccess = async (req, res) => {
-	try {
-		const store = new ResourceStore(req.app.locals.pool);
-		const userId = parseInt(req.params.userId);
-		const resourceId = parseInt(req.params.resourceId);
-
-		const hasAccess = await store.hasUserPurchasedAddOn(userId, resourceId);
-
-		return res.status(200).json({ has_access: hasAccess });
-	} catch (error) {
-		console.error('Check user add-on access error:', error);
-		return res.status(500).json({ error: 'Failed to check add-on access' });
-	}
-};
-
-/**
- * Get user's purchased add-ons
- * GET /users/:userId/resources/purchased
- */
-const getUserPurchasedAddOns = async (req, res) => {
-	try {
-		const store = new ResourceStore(req.app.locals.pool);
-		const userId = parseInt(req.params.userId);
-
-		const addOns = await store.getUserPurchasedAddOns(userId);
-
-		return res.status(200).json(addOns);
-	} catch (error) {
-		console.error('Get user purchased add-ons error:', error);
-		return res
-			.status(500)
-			.json({ error: "Failed to retrieve user's purchased add-ons" });
-	}
-};
-
-/**
- * Get user's accessible resources (free + purchased add-ons)
- * GET /users/:userId/resources/accessible
- */
-const getUserAccessibleResources = async (req, res) => {
-	try {
-		const store = new ResourceStore(req.app.locals.pool);
-		const userId = parseInt(req.params.userId);
-
-		const resources = await store.getUserAccessibleResources(userId);
-
-		return res.status(200).json(resources);
-	} catch (error) {
-		console.error('Get user accessible resources error:', error);
-		return res
-			.status(500)
-			.json({ error: "Failed to retrieve user's accessible resources" });
-	}
-};
-
-// ========================
-// ADMIN RESOURCE HANDLERS (Updated)
-// ========================
-
-/**
- * Get all resources (admin view - includes drafts and add-ons)
- * GET /admin/resources
- */
-const adminIndex = async (req, res) => {
-	try {
-		const store = new ResourceStore(req.app.locals.pool);
-		const resources = await store.adminIndex();
-		return res.status(200).json(resources);
-	} catch (error) {
-		console.error('Get admin resources error:', error);
-		return res.status(500).json({ error: 'Failed to retrieve resources' });
-	}
-};
-
-/**
- * Create new resource (updated to support add-ons)
- * POST /admin/resources
- */
-const create = async (req, res) => {
-	try {
-		// Validate resource data
-		const { error } = validateResource(req.body);
-		if (error) {
-			return res.status(400).json({ error: error.details[0].message });
-		}
-
-		const store = new ResourceStore(req.app.locals.pool);
-		const resource = await store.create(req.body);
-
-		return res.status(201).json(resource);
-	} catch (error) {
-		console.error('Create resource error:', error);
-		return res.status(500).json({ error: 'Failed to create resource' });
-	}
-};
-
-/**
- * Update existing resource (updated to support add-ons)
- * PUT /admin/resources/:id
- */
-const update = async (req, res) => {
-	try {
-		// Validate resource data
-		const { error } = validateResource(req.body);
-		if (error) {
-			return res.status(400).json({ error: error.details[0].message });
-		}
-
-		const store = new ResourceStore(req.app.locals.pool);
-
-		// Get current resource for Cloudinary cleanup
-		const currentResource = await store.show(parseInt(req.params.id));
-		if (!currentResource) {
-			return res.status(404).json({ error: 'Resource not found' });
-		}
-
-		const resource = await store.update(req.body, parseInt(req.params.id));
-
-		// Clean up old Cloudinary assets if they changed
-		const assetsToCheck = [
-			{
-				field: 'thumbnail',
-				current: currentResource.thumbnail,
-				new: req.body.thumbnail,
-			},
-			{
-				field: 'video_url',
-				current: currentResource.video_url,
-				new: req.body.video_url,
-			},
-			{
-				field: 'audio_url',
-				current: currentResource.audio_url,
-				new: req.body.audio_url,
-			},
-		];
-
-		for (const asset of assetsToCheck) {
-			if (asset.current && asset.new && asset.current !== asset.new) {
-				try {
-					const {
-						deleteImageDirect,
-						extractPublicIdFromUrl,
-					} = require('./cloudinary');
-					const publicId = extractPublicIdFromUrl(asset.current);
-					if (publicId) {
-						await deleteImageDirect(publicId);
-						console.log(
-							`Deleted old Cloudinary resource ${asset.field}:`,
-							publicId
-						);
-					}
-				} catch (imageError) {
-					console.warn(
-						`Failed to delete old Cloudinary resource ${asset.field}:`,
-						imageError.message
-					);
-					// Don't fail the operation if image cleanup fails
-				}
-			}
-		}
-
-		return res.status(200).json(resource);
-	} catch (error) {
-		console.error('Update resource error:', error);
-		return res.status(500).json({ error: 'Failed to update resource' });
-	}
-};
-
-/**
- * Delete resource (unchanged)
- * DELETE /admin/resources/:id
- */
-const deleteResource = async (req, res) => {
-	try {
-		const store = new ResourceStore(req.app.locals.pool);
-
-		// Get resource details before deletion for Cloudinary cleanup
-		const resourceToDelete = await store.show(parseInt(req.params.id));
-		if (!resourceToDelete) {
-			return res.status(404).json({ error: 'Resource not found' });
-		}
-
-		const resource = await store.delete(parseInt(req.params.id));
-
-		// Clean up Cloudinary assets if they exist
-		const cloudinaryAssets = [];
-		if (resourceToDelete.thumbnail)
-			cloudinaryAssets.push(resourceToDelete.thumbnail);
-		if (resourceToDelete.video_url)
-			cloudinaryAssets.push(resourceToDelete.video_url);
-		if (resourceToDelete.audio_url)
-			cloudinaryAssets.push(resourceToDelete.audio_url);
-
-		if (cloudinaryAssets.length > 0) {
-			try {
-				const {
-					deleteImageDirect,
-					extractPublicIdFromUrl,
-				} = require('./cloudinary');
-
-				for (const assetUrl of cloudinaryAssets) {
-					const publicId = extractPublicIdFromUrl(assetUrl);
-					if (publicId) {
-						await deleteImageDirect(publicId);
-						console.log('Deleted Cloudinary resource asset:', publicId);
-					}
-				}
-			} catch (imageError) {
-				console.warn(
-					'Failed to delete Cloudinary resource assets:',
-					imageError.message
-				);
-				// Don't fail the operation if image cleanup fails
-			}
-		}
-
-		return res.status(200).json({
-			message: 'Resource deleted successfully',
-			resource: resource,
-		});
-	} catch (error) {
-		console.error('Delete resource error:', error);
-		return res.status(500).json({ error: 'Failed to delete resource' });
-	}
-};
-
-/**
- * Get resource statistics (unchanged)
- * GET /admin/resources/stats
- */
-const getStats = async (req, res) => {
-	try {
-		const store = new ResourceStore(req.app.locals.pool);
-		const stats = await store.getStats();
-		return res.status(200).json(stats);
-	} catch (error) {
-		console.error('Get resource stats error:', error);
-		return res.status(500).json({ error: 'Failed to get resource statistics' });
-	}
-};
-
-// ========================
-// MEDIA UPLOAD HANDLERS (unchanged)
-// ========================
-
-/**
- * Upload audio file for resource
- * POST /admin/resources/upload-audio
- */
-const uploadAudio = async (req, res) => {
-	try {
-		if (!req.file) {
-			return res.status(400).json({ error: 'No audio file provided' });
-		}
-
-		// This would integrate with your Cloudinary service
-		// For now, return a placeholder response
-		return res.status(200).json({
-			message: 'Audio upload endpoint ready for Cloudinary integration',
-			file_info: {
-				filename: req.file.filename,
-				size: req.file.size,
-				mimetype: req.file.mimetype,
-			},
-			// In real implementation:
-			// audio_url: cloudinaryResponse.secure_url,
-			// duration: cloudinaryResponse.duration
-		});
-	} catch (error) {
-		console.error('Upload audio error:', error);
-		return res.status(500).json({ error: 'Failed to upload audio' });
-	}
-};
-
-/**
- * Upload video file for resource
- * POST /admin/resources/upload-video
- */
-const uploadVideo = async (req, res) => {
-	try {
-		if (!req.file) {
-			return res.status(400).json({ error: 'No video file provided' });
-		}
-
-		// This would integrate with your Cloudinary service
-		// For now, return a placeholder response
-		return res.status(200).json({
-			message: 'Video upload endpoint ready for Cloudinary integration',
-			file_info: {
-				filename: req.file.filename,
-				size: req.file.size,
-				mimetype: req.file.mimetype,
-			},
-			// In real implementation:
-			// video_url: cloudinaryResponse.secure_url,
-			// duration: cloudinaryResponse.duration
-		});
-	} catch (error) {
-		console.error('Upload video error:', error);
-		return res.status(500).json({ error: 'Failed to upload video' });
-	}
-};
-
-/**
- * Upload image/thumbnail for resource
- * POST /admin/resources/upload-image
- */
-const uploadImage = async (req, res) => {
-	try {
-		if (!req.file) {
-			return res.status(400).json({ error: 'No image file provided' });
-		}
-
-		// This would integrate with your Cloudinary service
-		// For now, return a placeholder response
-		return res.status(200).json({
-			message: 'Image upload endpoint ready for Cloudinary integration',
-			file_info: {
-				filename: req.file.filename,
-				size: req.file.size,
-				mimetype: req.file.mimetype,
-			},
-			// In real implementation:
-			// thumbnail_url: cloudinaryResponse.secure_url
-		});
-	} catch (error) {
-		console.error('Upload image error:', error);
-		return res.status(500).json({ error: 'Failed to upload image' });
-	}
-};
-
-/**
  * Resource route handler - manages all resource-related endpoints
  * Updated to include add-on endpoints and access control
  */
 const resources_route = (app) => {
 	const pool = app.locals.pool;
 	const store = new ResourceStore(pool);
+
+	// ========================
+	// PUBLIC RESOURCE HANDLERS
+	// ========================
+
+	/**
+	 * Get all published resources with purchase status for authenticated users
+	 * GET /resources
+	 */
+	const index = async (req, res) => {
+		try {
+			const userId = req.user?.id || null;
+			const resources = await store.index(userId);
+			return res.status(200).json(resources);
+		} catch (error) {
+			console.error('Get resources error:', error);
+			return res.status(500).json({ error: 'Failed to retrieve resources' });
+		}
+	};
+
+	/**
+	 * Get single resource by ID with access control for add-ons
+	 * GET /resources/:id
+	 */
+	const show = async (req, res) => {
+		try {
+			const userId = req.user?.id || null;
+			const resource = await store.show(parseInt(req.params.id), userId);
+
+			if (!resource) {
+				return res.status(404).json({ error: 'Resource not found' });
+			}
+
+			// Only show published resources to non-admin users
+			if (!resource.is_published && !req.user?.is_admin) {
+				return res.status(404).json({ error: 'Resource not found' });
+			}
+
+			// Check access for add-on resources
+			if (resource.is_add_on && !req.user?.is_admin) {
+				if (!userId) {
+					// Return limited info for unauthenticated users
+					return res.status(200).json({
+						...resource,
+						content: null,
+						video_url: null,
+						audio_url: null,
+						user_has_access: false,
+						access_required: true,
+						message:
+							'This is a premium add-on. Please sign in and purchase to access full content.',
+					});
+				}
+
+				// Check if user has purchased this add-on
+				const hasAccess = resource.user_has_access;
+				if (!hasAccess) {
+					return res.status(200).json({
+						...resource,
+						content: null,
+						video_url: null,
+						audio_url: null,
+						user_has_access: false,
+						access_required: true,
+						message:
+							'This is a premium add-on. Purchase required to access full content.',
+					});
+				}
+			}
+
+			return res.status(200).json(resource);
+		} catch (error) {
+			console.error('Get resource error:', error);
+			return res.status(500).json({ error: 'Failed to retrieve resource' });
+		}
+	};
+
+	/**
+	 * Get resources by type with purchase status
+	 * GET /resources/type/:type
+	 */
+	const getByType = async (req, res) => {
+		try {
+			const type = req.params.type;
+
+			if (!['blog', 'video', 'audio', 'manual'].includes(type)) {
+				return res.status(400).json({ error: 'Invalid resource type' });
+			}
+
+			const userId = req.user?.id || null;
+			const resources = await store.getByType(type, userId);
+			return res.status(200).json(resources);
+		} catch (error) {
+			console.error('Get resources by type error:', error);
+			return res
+				.status(500)
+				.json({ error: 'Failed to retrieve resources by type' });
+		}
+	};
+
+	/**
+	 * Get resources by author
+	 * GET /resources/author/:author
+	 */
+	const getByAuthor = async (req, res) => {
+		try {
+			const author = req.params.author;
+			const resources = await store.getByAuthor(author);
+			return res.status(200).json(resources);
+		} catch (error) {
+			console.error('Get resources by author error:', error);
+			return res
+				.status(500)
+				.json({ error: 'Failed to retrieve resources by author' });
+		}
+	};
+
+	/**
+	 * Search resources with purchase status
+	 * GET /resources/search?q=searchTerm
+	 */
+	const search = async (req, res) => {
+		try {
+			const searchTerm = req.query.q;
+
+			if (!searchTerm) {
+				return res.status(400).json({ error: 'Search term is required' });
+			}
+
+			if (searchTerm.length < 2) {
+				return res
+					.status(400)
+					.json({ error: 'Search term must be at least 2 characters' });
+			}
+
+			const userId = req.user?.id || null;
+			const resources = await store.search(searchTerm, userId);
+			return res.status(200).json(resources);
+		} catch (error) {
+			console.error('Search resources error:', error);
+			return res.status(500).json({ error: 'Failed to search resources' });
+		}
+	};
+
+	/**
+	 * Get resources by course
+	 * GET /resources/course/:courseId
+	 */
+	const getByCourse = async (req, res) => {
+		try {
+			const courseId = parseInt(req.params.courseId);
+			const resources = await store.getByCourse(courseId);
+			return res.status(200).json(resources);
+		} catch (error) {
+			console.error('Get resources by course error:', error);
+			return res
+				.status(500)
+				.json({ error: 'Failed to retrieve resources by course' });
+		}
+	};
+
+	/**
+	 * Get all authors
+	 * GET /resources/authors
+	 */
+	const getAuthors = async (req, res) => {
+		try {
+			const authors = await store.getAuthors();
+			return res.status(200).json(authors);
+		} catch (error) {
+			console.error('Get authors error:', error);
+			return res.status(500).json({ error: 'Failed to retrieve authors' });
+		}
+	};
+
+	// ========================
+	// ADD-ON SPECIFIC HANDLERS
+	// ========================
+
+	/**
+	 * Get all available add-ons with purchase status
+	 * GET /resources/addons
+	 */
+	const getAddOns = async (req, res) => {
+		try {
+			const userId = req.user?.id || null;
+			const addOns = await store.getAddOns(userId);
+			return res.status(200).json(addOns);
+		} catch (error) {
+			console.error('Get add-ons error:', error);
+			return res.status(500).json({ error: 'Failed to retrieve add-ons' });
+		}
+	};
+
+	/**
+	 * Check if user has purchased specific add-on
+	 * GET /users/:userId/resources/:resourceId/access
+	 */
+	const checkUserAddOnAccess = async (req, res) => {
+		try {
+			const userId = parseInt(req.params.userId);
+			const resourceId = parseInt(req.params.resourceId);
+
+			const hasAccess = await store.hasUserPurchasedAddOn(userId, resourceId);
+
+			return res.status(200).json({ has_access: hasAccess });
+		} catch (error) {
+			console.error('Check user add-on access error:', error);
+			return res.status(500).json({ error: 'Failed to check add-on access' });
+		}
+	};
+
+	/**
+	 * Get user's purchased add-ons
+	 * GET /users/:userId/resources/purchased
+	 */
+	const getUserPurchasedAddOns = async (req, res) => {
+		try {
+			const userId = parseInt(req.params.userId);
+
+			const addOns = await store.getUserPurchasedAddOns(userId);
+
+			return res.status(200).json(addOns);
+		} catch (error) {
+			console.error('Get user purchased add-ons error:', error);
+			return res
+				.status(500)
+				.json({ error: "Failed to retrieve user's purchased add-ons" });
+		}
+	};
+
+	/**
+	 * Get user's accessible resources (free + purchased add-ons)
+	 * GET /users/:userId/resources/accessible
+	 */
+	const getUserAccessibleResources = async (req, res) => {
+		try {
+			const userId = parseInt(req.params.userId);
+
+			const resources = await store.getUserAccessibleResources(userId);
+
+			return res.status(200).json(resources);
+		} catch (error) {
+			console.error('Get user accessible resources error:', error);
+			return res
+				.status(500)
+				.json({ error: "Failed to retrieve user's accessible resources" });
+		}
+	};
+
+	// ========================
+	// ADMIN RESOURCE HANDLERS
+	// ========================
+
+	/**
+	 * Get all resources (admin view - includes drafts and add-ons)
+	 * GET /admin/resources
+	 */
+	const adminIndex = async (req, res) => {
+		try {
+			const resources = await store.adminIndex();
+			return res.status(200).json(resources);
+		} catch (error) {
+			console.error('Get admin resources error:', error);
+			return res.status(500).json({ error: 'Failed to retrieve resources' });
+		}
+	};
+
+	/**
+	 * Create new resource (updated to support add-ons)
+	 * POST /admin/resources
+	 */
+	const create = async (req, res) => {
+		try {
+			// Validate resource data
+			const { error } = validateResource(req.body);
+			if (error) {
+				return res.status(400).json({ error: error.details[0].message });
+			}
+
+			const resource = await store.create(req.body);
+
+			return res.status(201).json(resource);
+		} catch (error) {
+			console.error('Create resource error:', error);
+			return res.status(500).json({ error: 'Failed to create resource' });
+		}
+	};
+
+	/**
+	 * Update existing resource (updated to support add-ons)
+	 * PUT /admin/resources/:id
+	 */
+	const update = async (req, res) => {
+		try {
+			// Validate resource data
+			const { error } = validateResource(req.body);
+			if (error) {
+				return res.status(400).json({ error: error.details[0].message });
+			}
+
+			// Get current resource for Cloudinary cleanup
+			const currentResource = await store.show(parseInt(req.params.id));
+			if (!currentResource) {
+				return res.status(404).json({ error: 'Resource not found' });
+			}
+
+			const resource = await store.update(req.body, parseInt(req.params.id));
+
+			// Clean up old Cloudinary assets if they changed
+			const assetsToCheck = [
+				{
+					field: 'thumbnail',
+					current: currentResource.thumbnail,
+					new: req.body.thumbnail,
+				},
+				{
+					field: 'video_url',
+					current: currentResource.video_url,
+					new: req.body.video_url,
+				},
+				{
+					field: 'audio_url',
+					current: currentResource.audio_url,
+					new: req.body.audio_url,
+				},
+			];
+
+			for (const asset of assetsToCheck) {
+				if (asset.current && asset.new && asset.current !== asset.new) {
+					try {
+						const {
+							deleteImageDirect,
+							extractPublicIdFromUrl,
+						} = require('./cloudinary');
+						const publicId = extractPublicIdFromUrl(asset.current);
+						if (publicId) {
+							await deleteImageDirect(publicId);
+							console.log(
+								`Deleted old Cloudinary resource ${asset.field}:`,
+								publicId
+							);
+						}
+					} catch (imageError) {
+						console.warn(
+							`Failed to delete old Cloudinary resource ${asset.field}:`,
+							imageError.message
+						);
+						// Don't fail the operation if image cleanup fails
+					}
+				}
+			}
+
+			return res.status(200).json(resource);
+		} catch (error) {
+			console.error('Update resource error:', error);
+			return res.status(500).json({ error: 'Failed to update resource' });
+		}
+	};
+
+	/**
+	 * Delete resource
+	 * DELETE /admin/resources/:id
+	 */
+	const deleteResource = async (req, res) => {
+		try {
+			// Get resource details before deletion for Cloudinary cleanup
+			const resourceToDelete = await store.show(parseInt(req.params.id));
+			if (!resourceToDelete) {
+				return res.status(404).json({ error: 'Resource not found' });
+			}
+
+			const resource = await store.delete(parseInt(req.params.id));
+
+			// Clean up Cloudinary assets if they exist
+			const cloudinaryAssets = [];
+			if (resourceToDelete.thumbnail)
+				cloudinaryAssets.push(resourceToDelete.thumbnail);
+			if (resourceToDelete.video_url)
+				cloudinaryAssets.push(resourceToDelete.video_url);
+			if (resourceToDelete.audio_url)
+				cloudinaryAssets.push(resourceToDelete.audio_url);
+
+			if (cloudinaryAssets.length > 0) {
+				try {
+					const {
+						deleteImageDirect,
+						extractPublicIdFromUrl,
+					} = require('./cloudinary');
+
+					for (const assetUrl of cloudinaryAssets) {
+						const publicId = extractPublicIdFromUrl(assetUrl);
+						if (publicId) {
+							await deleteImageDirect(publicId);
+							console.log('Deleted Cloudinary resource asset:', publicId);
+						}
+					}
+				} catch (imageError) {
+					console.warn(
+						'Failed to delete Cloudinary resource assets:',
+						imageError.message
+					);
+					// Don't fail the operation if image cleanup fails
+				}
+			}
+
+			return res.status(200).json({
+				message: 'Resource deleted successfully',
+				resource: resource,
+			});
+		} catch (error) {
+			console.error('Delete resource error:', error);
+			return res.status(500).json({ error: 'Failed to delete resource' });
+		}
+	};
+
+	/**
+	 * Get resource statistics
+	 * GET /admin/resources/stats
+	 */
+	const getStats = async (req, res) => {
+		try {
+			const stats = await store.getStats();
+			return res.status(200).json(stats);
+		} catch (error) {
+			console.error('Get resource stats error:', error);
+			return res.status(500).json({ error: 'Failed to get resource statistics' });
+		}
+	};
+
+	// ========================
+	// MEDIA UPLOAD HANDLERS
+	// ========================
+
+	/**
+	 * Upload audio file for resource
+	 * POST /admin/resources/upload-audio
+	 */
+	const uploadAudio = async (req, res) => {
+		try {
+			if (!req.file) {
+				return res.status(400).json({ error: 'No audio file provided' });
+			}
+
+			// This would integrate with your Cloudinary service
+			// For now, return a placeholder response
+			return res.status(200).json({
+				message: 'Audio upload endpoint ready for Cloudinary integration',
+				file_info: {
+					filename: req.file.filename,
+					size: req.file.size,
+					mimetype: req.file.mimetype,
+				},
+				// In real implementation:
+				// audio_url: cloudinaryResponse.secure_url,
+				// duration: cloudinaryResponse.duration
+			});
+		} catch (error) {
+			console.error('Upload audio error:', error);
+			return res.status(500).json({ error: 'Failed to upload audio' });
+		}
+	};
+
+	/**
+	 * Upload video file for resource
+	 * POST /admin/resources/upload-video
+	 */
+	const uploadVideo = async (req, res) => {
+		try {
+			if (!req.file) {
+				return res.status(400).json({ error: 'No video file provided' });
+			}
+
+			// This would integrate with your Cloudinary service
+			// For now, return a placeholder response
+			return res.status(200).json({
+				message: 'Video upload endpoint ready for Cloudinary integration',
+				file_info: {
+					filename: req.file.filename,
+					size: req.file.size,
+					mimetype: req.file.mimetype,
+				},
+				// In real implementation:
+				// video_url: cloudinaryResponse.secure_url,
+				// duration: cloudinaryResponse.duration
+			});
+		} catch (error) {
+			console.error('Upload video error:', error);
+			return res.status(500).json({ error: 'Failed to upload video' });
+		}
+	};
+
+	/**
+	 * Upload image/thumbnail for resource
+	 * POST /admin/resources/upload-image
+	 */
+	const uploadImage = async (req, res) => {
+		try {
+			if (!req.file) {
+				return res.status(400).json({ error: 'No image file provided' });
+			}
+
+			// This would integrate with your Cloudinary service
+			// For now, return a placeholder response
+			return res.status(200).json({
+				message: 'Image upload endpoint ready for Cloudinary integration',
+				file_info: {
+					filename: req.file.filename,
+					size: req.file.size,
+					mimetype: req.file.mimetype,
+				},
+				// In real implementation:
+				// thumbnail_url: cloudinaryResponse.secure_url
+			});
+		} catch (error) {
+			console.error('Upload image error:', error);
+			return res.status(500).json({ error: 'Failed to upload image' });
+		}
+	};
+
+	// ========================
+	// META TAG INJECTION FOR SOCIAL MEDIA SHARING
+	// ========================
 
 	/**
 	 * Get resource with meta tags for social media sharing
@@ -701,6 +682,10 @@ const resources_route = (app) => {
 			return res.status(500).json({ error: 'Failed to retrieve resource' });
 		}
 	};
+
+	// ========================
+	// ROUTE REGISTRATION
+	// ========================
 
 	// Public routes with optional authentication for purchase status
 	app.get(
