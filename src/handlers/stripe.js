@@ -912,6 +912,122 @@ const createShopCheckout = async (req, res) => {
 };
 
 /**
+ * Minimum class fee in USD. The class fee is "pay what you can" (rates vary by
+ * student), so this only guards against $0 / negative / tampered amounts.
+ */
+const MIN_CLASS_FEE_USD = 1;
+
+/**
+ * Create public class fee checkout session (no auth required).
+ * Students choose their own amount; enrollment is reconciled by email in the webhook.
+ * POST /stripe/create-class-checkout
+ */
+const createClassCheckout = async (req, res) => {
+	try {
+		const {
+			class_id,
+			amount,
+			student_name,
+			student_email,
+			success_url,
+			cancel_url,
+		} = req.body;
+
+		if (
+			!class_id ||
+			amount == null ||
+			!student_email ||
+			!success_url ||
+			!cancel_url
+		) {
+			return res.status(400).json({ error: 'Missing required parameters' });
+		}
+
+		const feeAmount = Number(amount);
+		if (!Number.isFinite(feeAmount) || feeAmount < MIN_CLASS_FEE_USD) {
+			return res
+				.status(400)
+				.json({ error: `Amount must be at least $${MIN_CLASS_FEE_USD}` });
+		}
+
+		// Look up the class name for a friendly line-item label (best-effort)
+		let className = `Class #${class_id}`;
+		try {
+			const classQuery = await req.app.locals.pool.query(
+				'SELECT class_name FROM classes WHERE id = $1',
+				[class_id]
+			);
+			if (classQuery.rows.length > 0) {
+				className = classQuery.rows[0].class_name;
+			}
+		} catch (error) {
+			console.error('Error fetching class name:', error);
+		}
+
+		// Dynamic price so the student-chosen amount is charged
+		const priceData = {
+			currency: 'usd',
+			product_data: {
+				name: `Class Fee - ${className}`,
+				metadata: { class_id: class_id.toString() },
+			},
+			unit_amount: Math.round(feeAmount * 100), // Convert to cents
+		};
+
+		// Temporary customer for the guest class-fee purchase
+		const customer = await stripe.customers.create({
+			email: student_email,
+			metadata: {
+				is_class_customer: 'true',
+				class_id: class_id.toString(),
+			},
+		});
+
+		const session = await stripe.checkout.sessions.create({
+			payment_method_types: ['card'],
+			line_items: [
+				{
+					price_data: priceData,
+					quantity: 1,
+				},
+			],
+			mode: 'payment',
+			success_url: success_url,
+			cancel_url: cancel_url,
+			customer: customer.id,
+			metadata: {
+				is_class_purchase: 'true',
+				class_id: class_id.toString(),
+				student_name: student_name || '',
+				student_email: student_email,
+			},
+		});
+
+		// Store a pending order record; the webhook marks it completed
+		const stripeOrderStore = new StripeOrderStore(req.app.locals.pool);
+		await stripeOrderStore.create({
+			checkoutSessionId: session.id,
+			paymentIntentId: null,
+			customerId: customer.id,
+			amountSubtotal: Math.round(feeAmount * 100),
+			amountTotal: Math.round(feeAmount * 100),
+			currency: 'usd',
+			paymentStatus: 'pending',
+			status: 'pending',
+		});
+
+		return res.status(200).json({
+			sessionId: session.id,
+			url: session.url,
+			orderId: null,
+		});
+	} catch (error) {
+		console.error('Class checkout error:', error);
+		res.status(500).json({ error: 'Failed to create class checkout session' });
+	}
+};
+
+/**
  * Handle large file downloads with extended timeouts
  * Used for HTML content > 10MB
  */
@@ -1378,8 +1494,11 @@ async function handleStripeEvent(event, pool) {
 				metadata,
 			} = stripeData;
 
-			// Save to Stripe orders table (skip for shop purchases - they're already created)
-			if (metadata?.is_shop_purchase !== 'true') {
+			// Save to Stripe orders table (skip for shop/class purchases - they're already created)
+			if (
+				metadata?.is_shop_purchase !== 'true' &&
+				metadata?.is_class_purchase !== 'true'
+			) {
 				const stripeOrderStore = new StripeOrderStore(pool);
 				await stripeOrderStore.create({
 					checkoutSessionId: checkout_session_id,
@@ -1449,6 +1568,38 @@ async function handleStripeEvent(event, pool) {
 						'Failed to update shop purchase payment status:',
 						error
 					);
+				}
+			} else if (metadata?.is_class_purchase === 'true') {
+				// Handle class fee payment - mark the pre-created order paid, then
+				// reconcile enrollment by email (existing student = order only,
+				// non-student = added to the class roster).
+				const stripeOrderStore = new StripeOrderStore(pool);
+				try {
+					await stripeOrderStore.updatePaymentStatus(checkout_session_id, {
+						paymentIntentId: payment_intent,
+						paymentStatus: 'paid',
+						status: 'completed',
+					});
+				} catch (error) {
+					console.error(
+						'Failed to update class purchase payment status:',
+						error
+					);
+				}
+
+				try {
+					const { ClassesStore } = require('../models/class');
+					const classesStore = new ClassesStore(pool);
+					const result = await classesStore.enrollPaidStudent(
+						parseInt(metadata.class_id),
+						{ name: metadata.student_name, email: metadata.student_email }
+					);
+					console.log(
+						`Class fee paid for class ${metadata.class_id} (${metadata.student_email}): ${result.status}`
+					);
+				} catch (error) {
+					console.error('Failed class fee enrollment handling:', error);
+					// Payment succeeded; enrollment issues must not fail the webhook
 				}
 			} else {
 				// Complete the main order (course/resource enrollment)
@@ -1731,6 +1882,7 @@ const stripe_route = (app) => {
 	// Public routes
 	app.post('/stripe/create-qa-checkout-session', createQACheckout); // Q&A checkout can be used by guests
 	app.post('/stripe/create-shop-checkout', createShopCheckout); // Shop checkout for public purchases
+	app.post('/stripe/create-class-checkout', createClassCheckout); // Class fee checkout for guests (pay what you can)
 	app.get('/stripe/shop-download/:sessionId', shopDownload); // Public download after shop purchase
 	app.get('/stripe/shop-info/:sessionId', shopInfo); // Get resource info without download
 

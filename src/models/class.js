@@ -767,6 +767,56 @@ class ClassesStore {
 		}
 	}
 
+	/**
+	 * Reconcile enrollment after a paid class fee.
+	 * If the email belongs to an existing user, they're already a student in the
+	 * system, so we take the payment only (no duplicate roster entry). Otherwise
+	 * we add them to the class roster via manual enrollment (dedup + capacity
+	 * guarded by adminEnrollStudent). Never throws - a payment already succeeded.
+	 */
+	async enrollPaidStudent(classId, { name, email }) {
+		// Is this email an existing account (student)?
+		const client = await this.pool.connect();
+		let isExistingUser = false;
+		try {
+			const userRes = await client.query(
+				'SELECT id FROM users WHERE email = $1',
+				[email]
+			);
+			isExistingUser = userRes.rows.length > 0;
+		} catch (error) {
+			console.error('enrollPaidStudent user lookup failed:', error);
+		} finally {
+			client.release();
+		}
+
+		if (isExistingUser) {
+			return { status: 'existing_student', enrolled: false };
+		}
+
+		// Not a registered user - add them to the roster
+		try {
+			const result = await this.adminEnrollStudent(classId, {
+				name,
+				email,
+				phone: null,
+				notes: 'Enrolled via paid class fee',
+			});
+			return {
+				status: 'manual_enrolled',
+				enrolled: true,
+				enrollment: result.enrollment,
+			};
+		} catch (error) {
+			// e.g. already manually enrolled, or class full - don't fail the payment
+			return {
+				status: 'enroll_skipped',
+				enrolled: false,
+				reason: error.message,
+			};
+		}
+	}
+
 	// ========================
 	// ADMIN OPERATIONS
 	// ========================
