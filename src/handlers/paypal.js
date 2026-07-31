@@ -1055,6 +1055,98 @@ const createClassCheckout = async (req, res) => {
 	}
 };
 
+// Fixed Jing Wu Foundation Reunion (Beijing 2027) deposit amount, USD.
+const REUNION_DEPOSIT_USD = 600;
+
+/**
+ * Create public reunion deposit checkout session (no auth required).
+ * Fixed $600 deposit; amount is server-controlled.
+ * POST /paypal/create-reunion-checkout
+ */
+const createReunionCheckout = async (req, res) => {
+	try {
+		const { student_name, student_email, student_phone, success_url, cancel_url } =
+			req.body;
+
+		if (!student_email) {
+			return res.status(400).json({ error: 'Missing required parameters' });
+		}
+
+		const orderRequest = {
+			intent: 'CAPTURE',
+			purchase_units: [
+				{
+					amount: {
+						currency_code: 'USD',
+						value: REUNION_DEPOSIT_USD.toFixed(2),
+					},
+					description: 'Jing Wu Foundation Reunion Deposit (Beijing 2027)',
+					custom_id: JSON.stringify({
+						is_reunion_deposit: 'true',
+						name: student_name || '',
+						email: student_email,
+						phone: student_phone || '',
+					}),
+				},
+			],
+			application_context: {
+				return_url:
+					success_url ||
+					`${process.env.FRONTEND_URL}/class-payment-success?paypal=true&type=reunion`,
+				cancel_url: cancel_url || `${process.env.FRONTEND_URL}/classes`,
+				brand_name: 'Jing Wu Foundation',
+				user_action: 'PAY_NOW',
+				shipping_preference: 'NO_SHIPPING',
+			},
+		};
+
+		const accessToken = await getPayPalAccessToken();
+		const response = await fetch(`${PAYPAL_BASE_URL}/v2/checkout/orders`, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Authorization: `Bearer ${accessToken}`,
+			},
+			body: JSON.stringify(orderRequest),
+		});
+
+		if (!response.ok) {
+			const errorData = await response.json();
+			throw new Error(
+				`Failed to create PayPal reunion order: ${
+					response.status
+				} - ${JSON.stringify(errorData)}`
+			);
+		}
+
+		const order = await response.json();
+
+		const paypalOrderStore = new PayPalOrderStore(req.app.locals.pool);
+		await paypalOrderStore.create({
+			paypalOrderId: order.id,
+			payerId: null,
+			amountValue: REUNION_DEPOSIT_USD,
+			amountCurrency: 'USD',
+			paymentStatus: 'pending',
+			captureId: null,
+			status: 'pending',
+		});
+
+		const approvalUrl = order.links.find(
+			(link) => link.rel === 'approve'
+		)?.href;
+
+		return res.status(200).json({
+			orderId: order.id,
+			approvalUrl: approvalUrl,
+			internalOrderId: null,
+		});
+	} catch (error) {
+		console.error('PayPal Reunion checkout error:', error.message);
+		res.status(500).json({ error: 'Failed to create reunion checkout session' });
+	}
+};
+
 /**
  * Handle large file downloads with extended timeouts
  * Used for HTML content > 10MB
@@ -2212,6 +2304,12 @@ async function handlePayPalEvent(event, pool) {
 			} catch (error) {
 				console.error('Failed PayPal class fee enrollment handling:', error);
 			}
+		} else if (metadata.is_reunion_deposit === 'true') {
+			// Reunion deposit - paypal_orders already saved above; record only,
+			// no enrollment. Payer name/email/phone are in custom_id metadata.
+			console.log(
+				`PayPal reunion deposit paid: ${metadata.name} <${metadata.email}> ${metadata.phone || ''}`
+			);
 		} else {
 			// Complete the main order (course/resource enrollment)
 			const { OrderStore } = require('../models/order');
@@ -2287,6 +2385,7 @@ const paypal_route = (app) => {
 	app.post('/paypal/setup-subscription-plan', setupSubscriptionPlan); // Setup subscription plan (run once)
 	app.post('/paypal/create-shop-checkout', createShopCheckout); // Shop checkout for public purchases
 	app.post('/paypal/create-class-checkout', createClassCheckout); // Class fee checkout for guests (pay what you can)
+	app.post('/paypal/create-reunion-checkout', createReunionCheckout); // Reunion deposit checkout for guests (fixed $600)
 	app.post('/paypal/manual-subscription-activate', manualSubscriptionActivate); // Manual subscription activation for testing
 	app.get('/paypal/shop-download/:orderId', shopDownload); // Public download after shop purchase
 	app.get('/paypal/shop-info/:orderId', shopInfo); // Get resource info without download

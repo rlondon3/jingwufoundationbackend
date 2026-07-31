@@ -1028,6 +1028,77 @@ const createClassCheckout = async (req, res) => {
 };
 
 /**
+ * Jing Wu Foundation Reunion (Beijing 2027) deposit.
+ * Stripe charges the saved $600 price on product prod_UzMmHaxMsl5IXp so the
+ * charge is tied to that product for reporting. REUNION_DEPOSIT_USD is used only
+ * for our own order record + the PayPal value (PayPal has no price object).
+ */
+const REUNION_DEPOSIT_PRICE_ID = 'price_1TzO31B8nUXBSOoDAI4y44em';
+const REUNION_DEPOSIT_USD = 600;
+
+/**
+ * Create public reunion deposit checkout session (no auth required).
+ * POST /stripe/create-reunion-checkout
+ */
+const createReunionCheckout = async (req, res) => {
+	try {
+		const { student_name, student_email, student_phone, success_url, cancel_url } =
+			req.body;
+
+		if (!student_email || !success_url || !cancel_url) {
+			return res.status(400).json({ error: 'Missing required parameters' });
+		}
+
+		const customer = await stripe.customers.create({
+			email: student_email,
+			metadata: { is_reunion_customer: 'true' },
+		});
+
+		const session = await stripe.checkout.sessions.create({
+			payment_method_types: ['card'],
+			line_items: [
+				{
+					price: REUNION_DEPOSIT_PRICE_ID,
+					quantity: 1,
+				},
+			],
+			mode: 'payment',
+			success_url: success_url,
+			cancel_url: cancel_url,
+			customer: customer.id,
+			metadata: {
+				is_reunion_deposit: 'true',
+				student_name: student_name || '',
+				student_email: student_email,
+				student_phone: student_phone || '',
+			},
+		});
+
+		// Store a pending order record; the webhook marks it completed
+		const stripeOrderStore = new StripeOrderStore(req.app.locals.pool);
+		await stripeOrderStore.create({
+			checkoutSessionId: session.id,
+			paymentIntentId: null,
+			customerId: customer.id,
+			amountSubtotal: REUNION_DEPOSIT_USD * 100,
+			amountTotal: REUNION_DEPOSIT_USD * 100,
+			currency: 'usd',
+			paymentStatus: 'pending',
+			status: 'pending',
+		});
+
+		return res.status(200).json({
+			sessionId: session.id,
+			url: session.url,
+			orderId: null,
+		});
+	} catch (error) {
+		console.error('Reunion checkout error:', error);
+		res.status(500).json({ error: 'Failed to create reunion checkout session' });
+	}
+};
+
+/**
  * Handle large file downloads with extended timeouts
  * Used for HTML content > 10MB
  */
@@ -1497,7 +1568,8 @@ async function handleStripeEvent(event, pool) {
 			// Save to Stripe orders table (skip for shop/class purchases - they're already created)
 			if (
 				metadata?.is_shop_purchase !== 'true' &&
-				metadata?.is_class_purchase !== 'true'
+				metadata?.is_class_purchase !== 'true' &&
+				metadata?.is_reunion_deposit !== 'true'
 			) {
 				const stripeOrderStore = new StripeOrderStore(pool);
 				await stripeOrderStore.create({
@@ -1601,6 +1673,25 @@ async function handleStripeEvent(event, pool) {
 					console.error('Failed class fee enrollment handling:', error);
 					// Payment succeeded; enrollment issues must not fail the webhook
 				}
+			} else if (metadata?.is_reunion_deposit === 'true') {
+				// Reunion deposit - mark the pre-created order paid (record only,
+				// no enrollment). Payer name/email/phone live in the session metadata.
+				const stripeOrderStore = new StripeOrderStore(pool);
+				try {
+					await stripeOrderStore.updatePaymentStatus(checkout_session_id, {
+						paymentIntentId: payment_intent,
+						paymentStatus: 'paid',
+						status: 'completed',
+					});
+				} catch (error) {
+					console.error(
+						'Failed to update reunion deposit payment status:',
+						error
+					);
+				}
+				console.log(
+					`Reunion deposit paid: ${metadata.student_name} <${metadata.student_email}> ${metadata.student_phone || ''}`
+				);
 			} else {
 				// Complete the main order (course/resource enrollment)
 				const { OrderStore } = require('../models/order');
@@ -1883,6 +1974,7 @@ const stripe_route = (app) => {
 	app.post('/stripe/create-qa-checkout-session', createQACheckout); // Q&A checkout can be used by guests
 	app.post('/stripe/create-shop-checkout', createShopCheckout); // Shop checkout for public purchases
 	app.post('/stripe/create-class-checkout', createClassCheckout); // Class fee checkout for guests (pay what you can)
+	app.post('/stripe/create-reunion-checkout', createReunionCheckout); // Reunion deposit checkout for guests (fixed $600)
 	app.get('/stripe/shop-download/:sessionId', shopDownload); // Public download after shop purchase
 	app.get('/stripe/shop-info/:sessionId', shopInfo); // Get resource info without download
 
