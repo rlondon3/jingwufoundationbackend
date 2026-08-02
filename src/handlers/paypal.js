@@ -13,6 +13,11 @@ const puppeteer = require('puppeteer');
 
 const { OrderStore } = require('../models/order');
 const { MessageStore } = require('../models/message');
+const { ReunionDepositStore } = require('../models/reunionDeposit');
+const {
+	REUNION_TERMS_VERSION,
+	REUNION_TERMS_TEXT,
+} = require('../config/reunionTerms');
 const OptimizedNeigongAgent = require('../utilis/optimizedAgent');
 
 // PayPal API configuration
@@ -1065,11 +1070,35 @@ const REUNION_DEPOSIT_USD = 600;
  */
 const createReunionCheckout = async (req, res) => {
 	try {
-		const { student_name, student_email, student_phone, success_url, cancel_url } =
-			req.body;
+		const {
+			student_name,
+			student_email,
+			student_phone,
+			success_url,
+			cancel_url,
+			terms_accepted,
+			terms_version,
+		} = req.body;
 
 		if (!student_email) {
 			return res.status(400).json({ error: 'Missing required parameters' });
+		}
+
+		// The deposit is non-refundable, so it may only be taken from someone who
+		// explicitly accepted the current terms. Reject rather than silently
+		// recording an unaccepted deposit.
+		if (terms_accepted !== true) {
+			return res.status(400).json({
+				error:
+					'The deposit terms must be accepted to continue. If you do not see them, please refresh the page.',
+			});
+		}
+
+		if (terms_version !== REUNION_TERMS_VERSION) {
+			return res.status(409).json({
+				error:
+					'The deposit terms have been updated. Please refresh the page and review them again.',
+			});
 		}
 
 		const orderRequest = {
@@ -1129,6 +1158,22 @@ const createReunionCheckout = async (req, res) => {
 			amountCurrency: 'USD',
 			paymentStatus: 'pending',
 			captureId: null,
+			status: 'pending',
+		});
+
+		// Record the payer and the terms they accepted, with the exact wording
+		// shown to them. Kept out of custom_id, which is capped at 127 chars.
+		const reunionDepositStore = new ReunionDepositStore(req.app.locals.pool);
+		await reunionDepositStore.create({
+			studentName: student_name,
+			studentEmail: student_email,
+			studentPhone: student_phone,
+			termsAccepted: true,
+			termsVersion: REUNION_TERMS_VERSION,
+			termsText: REUNION_TERMS_TEXT,
+			provider: 'paypal',
+			providerOrderId: order.id,
+			amountUsd: REUNION_DEPOSIT_USD,
 			status: 'pending',
 		});
 
@@ -2307,6 +2352,14 @@ async function handlePayPalEvent(event, pool) {
 		} else if (metadata.is_reunion_deposit === 'true') {
 			// Reunion deposit - paypal_orders already saved above; record only,
 			// no enrollment. Payer name/email/phone are in custom_id metadata.
+			// Mark the deposit record (which carries the accepted terms) paid.
+			try {
+				const reunionDepositStore = new ReunionDepositStore(pool);
+				await reunionDepositStore.markCompleted('paypal', orderId);
+			} catch (error) {
+				console.error('Failed to complete reunion deposit record:', error);
+			}
+
 			console.log(
 				`PayPal reunion deposit paid: ${metadata.name} <${metadata.email}> ${metadata.phone || ''}`
 			);

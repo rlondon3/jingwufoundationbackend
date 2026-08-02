@@ -14,6 +14,11 @@ const puppeteer = require('puppeteer');
 
 const { OrderStore } = require('../models/order');
 const { MessageStore } = require('../models/message');
+const { ReunionDepositStore } = require('../models/reunionDeposit');
+const {
+	REUNION_TERMS_VERSION,
+	REUNION_TERMS_TEXT,
+} = require('../config/reunionTerms');
 const OptimizedNeigongAgent = require('../utilis/optimizedAgent');
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -1042,11 +1047,35 @@ const REUNION_DEPOSIT_USD = 600;
  */
 const createReunionCheckout = async (req, res) => {
 	try {
-		const { student_name, student_email, student_phone, success_url, cancel_url } =
-			req.body;
+		const {
+			student_name,
+			student_email,
+			student_phone,
+			success_url,
+			cancel_url,
+			terms_accepted,
+			terms_version,
+		} = req.body;
 
 		if (!student_email || !success_url || !cancel_url) {
 			return res.status(400).json({ error: 'Missing required parameters' });
+		}
+
+		// The deposit is non-refundable, so it may only be taken from someone who
+		// explicitly accepted the current terms. Reject rather than silently
+		// recording an unaccepted deposit.
+		if (terms_accepted !== true) {
+			return res.status(400).json({
+				error:
+					'The deposit terms must be accepted to continue. If you do not see them, please refresh the page.',
+			});
+		}
+
+		if (terms_version !== REUNION_TERMS_VERSION) {
+			return res.status(409).json({
+				error:
+					'The deposit terms have been updated. Please refresh the page and review them again.',
+			});
 		}
 
 		const customer = await stripe.customers.create({
@@ -1084,6 +1113,22 @@ const createReunionCheckout = async (req, res) => {
 			amountTotal: REUNION_DEPOSIT_USD * 100,
 			currency: 'usd',
 			paymentStatus: 'pending',
+			status: 'pending',
+		});
+
+		// Record the payer and the terms they accepted, with the exact wording
+		// shown to them. Stamped server-side at NOW().
+		const reunionDepositStore = new ReunionDepositStore(req.app.locals.pool);
+		await reunionDepositStore.create({
+			studentName: student_name,
+			studentEmail: student_email,
+			studentPhone: student_phone,
+			termsAccepted: true,
+			termsVersion: REUNION_TERMS_VERSION,
+			termsText: REUNION_TERMS_TEXT,
+			provider: 'stripe',
+			providerOrderId: session.id,
+			amountUsd: REUNION_DEPOSIT_USD,
 			status: 'pending',
 		});
 
@@ -1689,6 +1734,18 @@ async function handleStripeEvent(event, pool) {
 						error
 					);
 				}
+
+				// Mark the deposit record (which carries the accepted terms) paid.
+				try {
+					const reunionDepositStore = new ReunionDepositStore(pool);
+					await reunionDepositStore.markCompleted(
+						'stripe',
+						checkout_session_id
+					);
+				} catch (error) {
+					console.error('Failed to complete reunion deposit record:', error);
+				}
+
 				console.log(
 					`Reunion deposit paid: ${metadata.student_name} <${metadata.student_email}> ${metadata.student_phone || ''}`
 				);
