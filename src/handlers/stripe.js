@@ -1038,7 +1038,11 @@ const createClassCheckout = async (req, res) => {
  * charge is tied to that product for reporting. REUNION_DEPOSIT_USD is used only
  * for our own order record + the PayPal value (PayPal has no price object).
  */
-const REUNION_DEPOSIT_PRICE_ID = 'price_1TzO31B8nUXBSOoDAI4y44em';
+// The default is the live price; set STRIPE_REUNION_PRICE_ID to a test-mode
+// price to exercise this flow locally (a live price id is not resolvable with a
+// test key, so checkout fails outright without it).
+const REUNION_DEPOSIT_PRICE_ID =
+	process.env.STRIPE_REUNION_PRICE_ID || 'price_1TzO31B8nUXBSOoDAI4y44em';
 const REUNION_DEPOSIT_USD = 600;
 
 /**
