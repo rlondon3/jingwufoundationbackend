@@ -254,17 +254,31 @@ class StripeOrderStore {
 		}
 	}
 
+	// amountSubtotal/amountTotal are optional: an order created before checkout
+	// records the expected amount, which a discount at the Stripe end can make
+	// wrong. Pass the webhook's figures to correct it; omit them to leave the
+	// recorded amounts alone.
 	async updatePaymentStatus(checkoutSessionId, updateData) {
 		try {
-			const { paymentIntentId, paymentStatus, status } = updateData;
+			const { paymentIntentId, paymentStatus, status, amountSubtotal, amountTotal } = updateData;
 			const query = `
-				UPDATE stripe_orders 
-				SET payment_intent_id = $2, payment_status = $3, status = $4, updated_at = NOW()
+				UPDATE stripe_orders
+				SET payment_intent_id = $2, payment_status = $3, status = $4,
+				    amount_subtotal = COALESCE($5, amount_subtotal),
+				    amount_total = COALESCE($6, amount_total),
+				    updated_at = NOW()
 				WHERE checkout_session_id = $1 AND deleted_at IS NULL
 				RETURNING *
 			`;
 			const client = await this.pool.connect();
-			const result = await client.query(query, [checkoutSessionId, paymentIntentId, paymentStatus, status]);
+			const result = await client.query(query, [
+				checkoutSessionId,
+				paymentIntentId,
+				paymentStatus,
+				status,
+				amountSubtotal === undefined ? null : amountSubtotal,
+				amountTotal === undefined ? null : amountTotal,
+			]);
 			client.release();
 			return result.rows[0];
 		} catch (error) {

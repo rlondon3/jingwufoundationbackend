@@ -1046,6 +1046,170 @@ const REUNION_DEPOSIT_PRICE_ID =
 const REUNION_DEPOSIT_USD = 600;
 
 /**
+ * The product behind the deposit price, needed to tell whether a product-scoped
+ * coupon covers it. The price id is fixed for the life of the process, so the
+ * lookup is made once and reused; a failure is not cached.
+ */
+let reunionProductIdPromise = null;
+const getReunionProductId = () => {
+	if (!reunionProductIdPromise) {
+		reunionProductIdPromise = stripe.prices
+			.retrieve(REUNION_DEPOSIT_PRICE_ID)
+			.then((price) =>
+				typeof price.product === 'string' ? price.product : price.product?.id
+			)
+			.catch((error) => {
+				reunionProductIdPromise = null;
+				throw error;
+			});
+	}
+	return reunionProductIdPromise;
+};
+
+/**
+ * Resolve a code the payer typed into a Stripe discount for the reunion deposit.
+ *
+ * Three forms are accepted, because what gets handed out may be either the
+ * customer-facing code or the promotion code id itself:
+ *   "EARLYBIRD"                       -> promotion code looked up by code
+ *   "promo_1UCZc1B8nUXBSOoDUv1BTGtl"  -> promotion code retrieved by id
+ *   "reunion-100-off"                 -> a bare coupon id
+ *
+ * Returns { promotionCode, coupon } or null when the code does not resolve to
+ * something currently redeemable. The caller decides how to report a null.
+ */
+const resolveReunionCoupon = async (couponCode) => {
+	const code = String(couponCode || '').trim();
+	if (!code) return null;
+
+	let promotionCode = null;
+	let coupon = null;
+
+	if (code.startsWith('promo_')) {
+		try {
+			promotionCode = await stripe.promotionCodes.retrieve(code);
+		} catch (error) {
+			return null;
+		}
+	} else {
+		const promotionCodes = await stripe.promotionCodes.list({
+			code,
+			active: true,
+			limit: 1,
+		});
+		if (promotionCodes.data.length > 0) {
+			promotionCode = promotionCodes.data[0];
+		}
+	}
+
+	if (promotionCode) {
+		// Retrieving by id does not filter on active the way list() does, so the
+		// redeemability checks have to be made here rather than assumed.
+		if (!promotionCode.active) return null;
+		if (promotionCode.expires_at && promotionCode.expires_at * 1000 < Date.now()) {
+			return null;
+		}
+		if (
+			promotionCode.max_redemptions != null &&
+			promotionCode.times_redeemed >= promotionCode.max_redemptions
+		) {
+			return null;
+		}
+		// A minimum-order restriction the deposit cannot meet would be rejected by
+		// Checkout anyway; catching it here gives the payer the error up front.
+		const minimumAmount = promotionCode.restrictions?.minimum_amount;
+		if (minimumAmount && REUNION_DEPOSIT_USD * 100 < minimumAmount) return null;
+
+		coupon = promotionCode.coupon;
+	} else {
+		try {
+			coupon = await stripe.coupons.retrieve(code);
+		} catch (error) {
+			return null;
+		}
+	}
+
+	if (!coupon || !coupon.valid) return null;
+	// An amount-off coupon in another currency cannot be applied to a USD deposit.
+	if (coupon.amount_off && coupon.currency && coupon.currency !== 'usd') return null;
+
+	// A coupon scoped to particular products is rejected by Checkout if none of
+	// them is on the session. Catching it here turns a 500 at session creation
+	// into the ordinary "this code doesn't apply" message.
+	const appliesToProducts = coupon.applies_to?.products;
+	if (appliesToProducts && appliesToProducts.length > 0) {
+		const reunionProductId = await getReunionProductId();
+		if (!appliesToProducts.includes(reunionProductId)) return null;
+	}
+
+	return { promotionCode, coupon };
+};
+
+/** Deposit total in cents once a resolved coupon is applied, floored at zero. */
+const applyCouponToCents = (amountCents, coupon) => {
+	if (coupon.percent_off) {
+		return Math.max(
+			0,
+			Math.round(amountCents * (1 - coupon.percent_off / 100))
+		);
+	}
+	if (coupon.amount_off) {
+		return Math.max(0, amountCents - coupon.amount_off);
+	}
+	return amountCents;
+};
+
+/**
+ * Validate a reunion deposit coupon and quote the discounted total.
+ * Public, because the reunion deposit is a guest flow — unlike
+ * /stripe/validate-coupon, which sits behind authentication.
+ * POST /stripe/validate-reunion-coupon
+ */
+const validateReunionCoupon = async (req, res) => {
+	try {
+		const { coupon_code } = req.body;
+
+		if (!coupon_code) {
+			return res
+				.status(400)
+				.json({ valid: false, error: 'Coupon code is required' });
+		}
+
+		const resolved = await resolveReunionCoupon(coupon_code);
+
+		// A code that does not resolve is a normal outcome of someone typing, not
+		// a request error, so it comes back 200 with valid: false.
+		if (!resolved) {
+			return res
+				.status(200)
+				.json({ valid: false, error: 'Invalid or expired coupon code' });
+		}
+
+		const { promotionCode, coupon } = resolved;
+		const originalCents = REUNION_DEPOSIT_USD * 100;
+		const finalCents = applyCouponToCents(originalCents, coupon);
+
+		return res.status(200).json({
+			valid: true,
+			// Echo the customer-facing code so the UI shows what was matched, which
+			// may differ from the promo_… id the payer pasted in.
+			code: promotionCode ? promotionCode.code : coupon.id,
+			name: coupon.name || null,
+			percent_off: coupon.percent_off,
+			amount_off: coupon.amount_off,
+			original_usd: originalCents / 100,
+			discount_usd: (originalCents - finalCents) / 100,
+			final_usd: finalCents / 100,
+		});
+	} catch (error) {
+		console.error('Reunion coupon validation error:', error);
+		return res
+			.status(500)
+			.json({ valid: false, error: 'Could not validate coupon code' });
+	}
+};
+
+/**
  * Create public reunion deposit checkout session (no auth required).
  * POST /stripe/create-reunion-checkout
  */
@@ -1059,6 +1223,7 @@ const createReunionCheckout = async (req, res) => {
 			cancel_url,
 			terms_accepted,
 			terms_version,
+			coupon_code,
 		} = req.body;
 
 		if (!student_email || !success_url || !cancel_url) {
@@ -1082,6 +1247,26 @@ const createReunionCheckout = async (req, res) => {
 			});
 		}
 
+		// The coupon is re-resolved here rather than trusted from the client: the
+		// quote the payer was shown carries no authority over what is charged.
+		let discounts = [];
+		let appliedCouponCode = null;
+		let amountUsd = REUNION_DEPOSIT_USD;
+
+		if (coupon_code) {
+			const resolved = await resolveReunionCoupon(coupon_code);
+			if (!resolved) {
+				return res.status(400).json({ error: 'Invalid or expired coupon code' });
+			}
+
+			const { promotionCode, coupon } = resolved;
+			discounts = promotionCode
+				? [{ promotion_code: promotionCode.id }]
+				: [{ coupon: coupon.id }];
+			appliedCouponCode = promotionCode ? promotionCode.code : coupon.id;
+			amountUsd = applyCouponToCents(REUNION_DEPOSIT_USD * 100, coupon) / 100;
+		}
+
 		const customer = await stripe.customers.create({
 			email: student_email,
 			metadata: { is_reunion_customer: 'true' },
@@ -1099,22 +1284,25 @@ const createReunionCheckout = async (req, res) => {
 			success_url: success_url,
 			cancel_url: cancel_url,
 			customer: customer.id,
+			...(discounts.length > 0 && { discounts }),
 			metadata: {
 				is_reunion_deposit: 'true',
 				student_name: student_name || '',
 				student_email: student_email,
 				student_phone: student_phone || '',
+				coupon_code: appliedCouponCode || '',
 			},
 		});
 
-		// Store a pending order record; the webhook marks it completed
+		// Store a pending order record; the webhook marks it completed and
+		// overwrites these amounts with what Stripe actually charged.
 		const stripeOrderStore = new StripeOrderStore(req.app.locals.pool);
 		await stripeOrderStore.create({
 			checkoutSessionId: session.id,
 			paymentIntentId: null,
 			customerId: customer.id,
 			amountSubtotal: REUNION_DEPOSIT_USD * 100,
-			amountTotal: REUNION_DEPOSIT_USD * 100,
+			amountTotal: Math.round(amountUsd * 100),
 			currency: 'usd',
 			paymentStatus: 'pending',
 			status: 'pending',
@@ -1132,7 +1320,8 @@ const createReunionCheckout = async (req, res) => {
 			termsText: REUNION_TERMS_TEXT,
 			provider: 'stripe',
 			providerOrderId: session.id,
-			amountUsd: REUNION_DEPOSIT_USD,
+			amountUsd,
+			couponCode: appliedCouponCode,
 			status: 'pending',
 		});
 
@@ -1725,12 +1914,16 @@ async function handleStripeEvent(event, pool) {
 			} else if (metadata?.is_reunion_deposit === 'true') {
 				// Reunion deposit - mark the pre-created order paid (record only,
 				// no enrollment). Payer name/email/phone live in the session metadata.
+				// A coupon means the pending rows hold the expected amount, not the
+				// charged one, so both records are corrected from the session.
 				const stripeOrderStore = new StripeOrderStore(pool);
 				try {
 					await stripeOrderStore.updatePaymentStatus(checkout_session_id, {
 						paymentIntentId: payment_intent,
 						paymentStatus: 'paid',
 						status: 'completed',
+						amountSubtotal: amount_subtotal,
+						amountTotal: amount_total,
 					});
 				} catch (error) {
 					console.error(
@@ -1744,14 +1937,19 @@ async function handleStripeEvent(event, pool) {
 					const reunionDepositStore = new ReunionDepositStore(pool);
 					await reunionDepositStore.markCompleted(
 						'stripe',
-						checkout_session_id
+						checkout_session_id,
+						{
+							amountUsd:
+								amount_total == null ? undefined : amount_total / 100,
+						}
 					);
 				} catch (error) {
 					console.error('Failed to complete reunion deposit record:', error);
 				}
 
 				console.log(
-					`Reunion deposit paid: ${metadata.student_name} <${metadata.student_email}> ${metadata.student_phone || ''}`
+					`Reunion deposit paid: ${metadata.student_name} <${metadata.student_email}> ${metadata.student_phone || ''}` +
+						(metadata.coupon_code ? ` (coupon ${metadata.coupon_code})` : '')
 				);
 			} else {
 				// Complete the main order (course/resource enrollment)
@@ -2035,7 +2233,8 @@ const stripe_route = (app) => {
 	app.post('/stripe/create-qa-checkout-session', createQACheckout); // Q&A checkout can be used by guests
 	app.post('/stripe/create-shop-checkout', createShopCheckout); // Shop checkout for public purchases
 	app.post('/stripe/create-class-checkout', createClassCheckout); // Class fee checkout for guests (pay what you can)
-	app.post('/stripe/create-reunion-checkout', createReunionCheckout); // Reunion deposit checkout for guests (fixed $600)
+	app.post('/stripe/create-reunion-checkout', createReunionCheckout); // Reunion deposit checkout for guests ($600, less any coupon)
+	app.post('/stripe/validate-reunion-coupon', validateReunionCoupon); // Quote a coupon against the deposit; guest flow, so unauthenticated
 	app.get('/stripe/shop-download/:sessionId', shopDownload); // Public download after shop purchase
 	app.get('/stripe/shop-info/:sessionId', shopInfo); // Get resource info without download
 
