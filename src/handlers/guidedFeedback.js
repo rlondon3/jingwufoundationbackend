@@ -463,6 +463,86 @@ const getCourseResponseAnalytics = async (req, res) => {
 	}
 };
 
+// ========================
+// FEATURED ANSWERS (course page quotes)
+// ========================
+
+/**
+ * Written answers to pick quotes from
+ * GET /admin/courses/:courseId/feedback/responses
+ */
+const getCourseTextResponses = async (req, res) => {
+	try {
+		const store = new GuidedFeedbackStore(req.app.locals.pool);
+		const responses = await store.getCourseTextResponses(parseInt(req.params.courseId));
+		return res.status(200).json(responses);
+	} catch (error) {
+		console.error('Get course text responses error:', error);
+		return res.status(500).json({ error: 'Failed to get responses' });
+	}
+};
+
+/**
+ * Show or hide one answer on the course page
+ * PUT /admin/feedback/responses/:id/featured
+ */
+const setResponseFeatured = async (req, res) => {
+	try {
+		if (typeof req.body?.is_featured !== 'boolean') {
+			return res.status(400).json({ error: 'is_featured must be true or false' });
+		}
+		const store = new GuidedFeedbackStore(req.app.locals.pool);
+		const updated = await store.setResponseFeatured(parseInt(req.params.id), req.body.is_featured);
+		if (!updated) {
+			return res.status(404).json({ error: 'Response not found' });
+		}
+		return res.status(200).json(updated);
+	} catch (error) {
+		console.error('Set featured response error:', error);
+		return res.status(500).json({ error: 'Failed to update response' });
+	}
+};
+
+/**
+ * Heading for the course page quotes (blank resets to the default)
+ * PUT /admin/courses/:courseId/feedback/featured-heading
+ */
+const setFeaturedHeading = async (req, res) => {
+	try {
+		const heading = typeof req.body?.heading === 'string' ? req.body.heading.trim() : '';
+		if (heading.length > 150) {
+			return res.status(400).json({ error: 'Heading must be 150 characters or fewer' });
+		}
+		const store = new GuidedFeedbackStore(req.app.locals.pool);
+		const updated = await store.setFeaturedHeading(parseInt(req.params.courseId), heading || null);
+		if (!updated) {
+			return res.status(404).json({ error: 'Course not found' });
+		}
+		return res.status(200).json(updated);
+	} catch (error) {
+		console.error('Set featured heading error:', error);
+		return res.status(500).json({ error: 'Failed to update heading' });
+	}
+};
+
+/**
+ * Quotes shown on the course page
+ * GET /courses/:courseId/featured-feedback
+ */
+const getFeaturedFeedback = async (req, res) => {
+	try {
+		const store = new GuidedFeedbackStore(req.app.locals.pool);
+		const featured = await store.getFeaturedFeedback(parseInt(req.params.courseId));
+		if (!featured) {
+			return res.status(404).json({ error: 'Course not found' });
+		}
+		return res.status(200).json(featured);
+	} catch (error) {
+		console.error('Get featured feedback error:', error);
+		return res.status(500).json({ error: 'Failed to get featured feedback' });
+	}
+};
+
 /**
  * Guided Feedback route handler - manages all guided feedback endpoints
  */
@@ -557,6 +637,27 @@ const guided_feedback_route = (app) => {
 		authenticationToken,
 		requireAdmin,
 		getCourseResponseAnalytics
+	);
+
+	// Course page quotes
+	app.get('/courses/:courseId/featured-feedback', getFeaturedFeedback);
+	app.get(
+		'/admin/courses/:courseId/feedback/responses',
+		authenticationToken,
+		requireAdmin,
+		getCourseTextResponses
+	);
+	app.put(
+		'/admin/feedback/responses/:id/featured',
+		authenticationToken,
+		requireAdmin,
+		setResponseFeatured
+	);
+	app.put(
+		'/admin/courses/:courseId/feedback/featured-heading',
+		authenticationToken,
+		requireAdmin,
+		setFeaturedHeading
 	);
 };
 

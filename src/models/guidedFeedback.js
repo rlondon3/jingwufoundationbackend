@@ -518,6 +518,100 @@ class GuidedFeedbackStore {
 			throw new Error(`Could not get response analytics: ${error}`);
 		}
 	}
+
+	// ========================
+	// FEATURED ANSWERS (course page quotes)
+	// ========================
+
+	/**
+	 * Every written answer for a course, for the admin to pick quotes from
+	 */
+	async getCourseTextResponses(courseId) {
+		try {
+			const sql = `
+				SELECT r.id, r.question_id, q.question_text, q.is_active AS question_is_active,
+				       r.response_text, r.is_featured, r.created_at, u.name AS user_name
+				FROM course_feedback_responses r
+				JOIN course_feedback_questions q ON q.id = r.question_id
+				JOIN users u ON u.id = r.user_id
+				WHERE q.course_id = $1 AND q.question_type = 'text'
+				  AND NULLIF(TRIM(r.response_text), '') IS NOT NULL
+				ORDER BY q.display_order ASC, q.id ASC, r.created_at DESC
+			`;
+			const res = await this.pool.query(sql, [courseId]);
+			return res.rows;
+		} catch (error) {
+			throw new Error(`Could not get text responses: ${error}`);
+		}
+	}
+
+	async setResponseFeatured(responseId, isFeatured) {
+		try {
+			const res = await this.pool.query(
+				'UPDATE course_feedback_responses SET is_featured = $1 WHERE id = $2 RETURNING id, is_featured',
+				[isFeatured, responseId]
+			);
+			return res.rows[0] || null;
+		} catch (error) {
+			throw new Error(`Could not update featured answer: ${error}`);
+		}
+	}
+
+	async setFeaturedHeading(courseId, heading) {
+		try {
+			const res = await this.pool.query(
+				'UPDATE courses SET featured_feedback_heading = $1 WHERE id = $2 RETURNING featured_feedback_heading',
+				[heading, courseId]
+			);
+			return res.rows[0] || null;
+		} catch (error) {
+			throw new Error(`Could not update featured heading: ${error}`);
+		}
+	}
+
+	/**
+	 * Featured answers grouped by question, for the public course page.
+	 * Names are reduced to first name + last initial.
+	 */
+	async getFeaturedFeedback(courseId) {
+		try {
+			const course = await this.pool.query(
+				'SELECT featured_feedback_heading FROM courses WHERE id = $1',
+				[courseId]
+			);
+			if (course.rows.length === 0) return null;
+
+			const res = await this.pool.query(
+				`SELECT q.id AS question_id, q.question_text,
+				        json_agg(json_build_object('id', r.id, 'text', r.response_text, 'name', u.name)
+				                 ORDER BY r.created_at DESC) AS responses
+				 FROM course_feedback_responses r
+				 JOIN course_feedback_questions q ON q.id = r.question_id
+				 JOIN users u ON u.id = r.user_id
+				 WHERE q.course_id = $1 AND r.is_featured
+				   AND NULLIF(TRIM(r.response_text), '') IS NOT NULL
+				 GROUP BY q.id, q.question_text, q.display_order
+				 ORDER BY q.display_order ASC, q.id ASC`,
+				[courseId]
+			);
+
+			const shortName = (name = '') => {
+				const parts = name.trim().split(/\s+/).filter(Boolean);
+				if (parts.length === 0) return 'A student';
+				return parts.length > 1 ? `${parts[0]} ${parts[parts.length - 1][0]}.` : parts[0];
+			};
+
+			return {
+				heading: course.rows[0].featured_feedback_heading,
+				questions: res.rows.map((q) => ({
+					...q,
+					responses: q.responses.map((r) => ({ ...r, name: shortName(r.name) })),
+				})),
+			};
+		} catch (error) {
+			throw new Error(`Could not get featured feedback: ${error}`);
+		}
+	}
 }
 
 /**
