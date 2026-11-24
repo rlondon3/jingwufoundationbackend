@@ -6,6 +6,16 @@ const { generateToken } = require('../middleware/auth');
 // Never send password hashes to the client
 const withoutPassword = ({ password, ...user }) => user;
 
+// Members only see their own email; admins see everyone's
+const forViewer = (user, viewer) => {
+	const visible = withoutPassword(user);
+	if (!viewer?.is_admin && String(viewer?.id) !== String(visible.id)) {
+		delete visible.email;
+		delete visible.newsletter_unsubscribed_at;
+	}
+	return visible;
+};
+
 /**
  * User route handler - manages all user-related endpoints
  */
@@ -20,7 +30,7 @@ const users_route = (app) => {
 	const index = async (req, res) => {
 		try {
 			const users = await store.index();
-			return res.status(200).json(users.map(withoutPassword));
+			return res.status(200).json(users.map((user) => forViewer(user, req.user)));
 		} catch (error) {
 			return res.status(400).json({ error: error.message });
 		}
@@ -36,7 +46,7 @@ const users_route = (app) => {
 			if (!user) {
 				return res.status(404).json({ error: 'User not found' });
 			}
-			return res.status(200).json(withoutPassword(user));
+			return res.status(200).json(forViewer(user, req.user));
 		} catch (error) {
 			return res.status(400).json({ error: error.message });
 		}
@@ -271,15 +281,12 @@ const users_route = (app) => {
 			// Get user's enrolled courses
 			const userCourses = await store.getUserCourses(userId);
 			
-			// Remove sensitive data
-			delete user.password;
-
 			// Extract course IDs from enrollment objects for frontend compatibility
 			const courseIds = userCourses ? userCourses.map(enrollment => enrollment.course_id) : [];
 
 			// Add enrolled courses to user object
 			const userWithCourses = {
-				...user,
+				...forViewer(user, req.user),
 				current_courses: courseIds
 			};
 
