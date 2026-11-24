@@ -109,7 +109,7 @@ class UserStore {
           email=($2), 
           avatar=($3), 
           username=($4),
-          password=($5),
+          password=COALESCE($5, password),
           is_admin=($6), 
           city=($7), 
           country=($8), 
@@ -120,10 +120,10 @@ class UserStore {
         WHERE id=($12) RETURNING *
       `;
 
-			const hash = bcrypt.hashSync(
-				user.password + `${PEPPER}`,
-				parseInt(`${SALT_ROUNDS}`)
-			);
+			// No password given means keep the current one
+			const hash = user.password
+				? bcrypt.hashSync(user.password + `${PEPPER}`, parseInt(`${SALT_ROUNDS}`))
+				: null;
 
 			const client = await this.pool.connect();
 			const res = await client.query(sql, [

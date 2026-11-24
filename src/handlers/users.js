@@ -3,6 +3,9 @@ const { UserStore, handleUserErrors } = require('../models/user');
 const { CourseStore } = require('../models/course');
 const { generateToken } = require('../middleware/auth');
 
+// Never send password hashes to the client
+const withoutPassword = ({ password, ...user }) => user;
+
 /**
  * User route handler - manages all user-related endpoints
  */
@@ -14,30 +17,10 @@ const users_route = (app) => {
 	 * Get all users (admin endpoint)
 	 * POST /verify/users - requires authentication
 	 */
-
-	app.get('/test-token', (req, res) => {
-		try {
-			const testUser = { id: 1, name: 'Test', is_admin: true };
-			const token = generateToken(testUser);
-
-			// Try to verify it immediately
-			const jwt = require('jsonwebtoken');
-			const decoded = jwt.verify(token, process.env.TOKEN_SECRET);
-
-			res.json({
-				generated: token,
-				decoded: decoded,
-				secret_exists: !!process.env.TOKEN_SECRET,
-			});
-		} catch (error) {
-			res.json({ error: error.message });
-		}
-	});
-
 	const index = async (req, res) => {
 		try {
 			const users = await store.index();
-			return res.status(200).json(users);
+			return res.status(200).json(users.map(withoutPassword));
 		} catch (error) {
 			return res.status(400).json({ error: error.message });
 		}
@@ -53,7 +36,7 @@ const users_route = (app) => {
 			if (!user) {
 				return res.status(404).json({ error: 'User not found' });
 			}
-			return res.status(200).json(user);
+			return res.status(200).json(withoutPassword(user));
 		} catch (error) {
 			return res.status(400).json({ error: error.message });
 		}
@@ -228,7 +211,7 @@ const users_route = (app) => {
 
 			return res.status(200).json({
 				message: 'User deleted successfully',
-				user: deletedUser,
+				user: withoutPassword(deletedUser),
 			});
 		} catch (error) {
 			console.error('User deletion error:', error);
