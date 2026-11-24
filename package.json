@@ -3,6 +3,9 @@
 	"version": "1.0.0",
 	"description": "",
 	"main": "src/server.js",
+	"engines": {
+		"node": "22.x"
+	},
 	"scripts": {
 		"dev": "nodemon src/server.js",
 		"start": "db-migrate up && node src/server.js",
@@ -17,6 +20,7 @@
 	"license": "ISC",
 	"dependencies": {
 		"@aws-sdk/client-s3": "^3.863.0",
+		"@aws-sdk/client-sesv2": "^3.1176.0",
 		"@langchain/anthropic": "^0.3.23",
 		"@langchain/core": "^0.3.61",
 		"@paypal/paypal-server-sdk": "^1.1.0",
