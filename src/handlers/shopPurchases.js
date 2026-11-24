@@ -17,8 +17,14 @@ const MAX_ATTACHMENT_BYTES = 28 * 1024 * 1024;
 
 const emailSchema = Joi.string().trim().lowercase().email().max(255);
 
-const renderPurchaseEmail = (resource) => {
+// Paid resources get a purchase thank-you; free ones are just shared
+const renderResourceEmail = (resource) => {
 	const title = escapeHtml(resource.title);
+	const isPaid = Number(resource.price) > 0;
+	const heading = isPaid ? 'Thank you for your purchase' : `Here's your copy of ${resource.title}`;
+	const intro = isPaid
+		? `Your copy of <strong>${title}</strong> is attached to this email as a PDF.`
+		: `We've attached <strong>${title}</strong> to this email as a PDF. Enjoy the read.`;
 	const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -35,8 +41,8 @@ const renderPurchaseEmail = (resource) => {
       <div style="font-family:${FONT};font-size:20px;letter-spacing:.04em;color:#ffffff;">Jing Wu Foundation</div>
     </td></tr>
     <tr><td style="padding:36px 40px;">
-      <h1 style="margin:0 0 18px;font-family:${FONT};font-size:26px;line-height:1.3;font-weight:normal;color:${COLORS.heading};">Thank you for your purchase</h1>
-      <p style="margin:0 0 18px;font-family:${FONT};font-size:17px;line-height:1.65;color:${COLORS.text};">Your copy of <strong>${title}</strong> is attached to this email as a PDF.</p>
+      <h1 style="margin:0 0 18px;font-family:${FONT};font-size:26px;line-height:1.3;font-weight:normal;color:${COLORS.heading};">${escapeHtml(heading)}</h1>
+      <p style="margin:0 0 18px;font-family:${FONT};font-size:17px;line-height:1.65;color:${COLORS.text};">${intro}</p>
       <p style="margin:0;font-family:${FONT};font-size:17px;line-height:1.65;color:${COLORS.text};">If you have any trouble opening it, just reply to this email and we'll help.</p>
     </td></tr>
   </table>
@@ -51,9 +57,11 @@ const renderPurchaseEmail = (resource) => {
 </html>`;
 
 	const text = [
-		'Thank you for your purchase',
+		heading,
 		'',
-		`Your copy of ${resource.title} is attached to this email as a PDF.`,
+		isPaid
+			? `Your copy of ${resource.title} is attached to this email as a PDF.`
+			: `We've attached ${resource.title} to this email as a PDF. Enjoy the read.`,
 		'',
 		"If you have any trouble opening it, just reply to this email and we'll help.",
 		'',
@@ -75,7 +83,7 @@ const emailResourceCopy = async (pool, resourceId, to) => {
 		throw new Error(`PDF is ${(pdf.length / 1024 / 1024).toFixed(1)}MB, too large to email`);
 	}
 
-	const { subject, html, text } = renderPurchaseEmail(resource);
+	const { subject, html, text } = renderResourceEmail(resource);
 	await sendMail({
 		to,
 		subject,
@@ -192,3 +200,4 @@ const shop_purchases_route = (app) => {
 module.exports = shop_purchases_route;
 module.exports.deliverShopPurchase = deliverShopPurchase;
 module.exports.emailSchema = emailSchema;
+module.exports.renderResourceEmail = renderResourceEmail;

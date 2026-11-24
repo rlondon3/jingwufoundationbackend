@@ -127,3 +127,5 @@ temp/
 .yarn-integrity
 yarn.lock
 package-lock.json
+# Puppeteer Chrome download (see .puppeteerrc.cjs)
+.cache/
