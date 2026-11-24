@@ -116,8 +116,9 @@ GROUP BY n.id
 				// Create news article
 				const newsSql = `
           INSERT INTO news (title, description, body, thumbnail_url, author_name, 
-                           status, is_important, publish_at, expires_at)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *
+                           status, is_important, publish_at, expires_at,
+                           button_text, button_url)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *
         `;
 
 				const newsRes = await client.query(newsSql, [
@@ -130,6 +131,8 @@ GROUP BY n.id
 					newsData.is_important || false,
 					newsData.publish_at || null,
 					newsData.expires_at || null,
+					newsData.button_text || null,
+					newsData.button_url || null,
 				]);
 
 				const newsId = newsRes.rows[0].id;
@@ -174,8 +177,9 @@ GROUP BY n.id
           UPDATE news SET 
             title = $1, description = $2, body = $3, thumbnail_url = $4,
             author_name = $5, status = $6, is_important = $7,
-            publish_at = $8, expires_at = $9, updated_at = CURRENT_TIMESTAMP
-          WHERE id = $10 RETURNING *
+            publish_at = $8, expires_at = $9,
+            button_text = $10, button_url = $11, updated_at = CURRENT_TIMESTAMP
+          WHERE id = $12 RETURNING *
         `;
 
 				const res = await client.query(sql, [
@@ -188,6 +192,8 @@ GROUP BY n.id
 					newsData.is_important,
 					newsData.publish_at,
 					newsData.expires_at,
+					newsData.button_text || null,
+					newsData.button_url || null,
 					id,
 				]);
 
@@ -409,7 +415,21 @@ function validateNews(news) {
 		expires_at: Joi.date().allow(null),
 		tags: Joi.array().items(Joi.string().min(1).max(50)).default([]),
 		body_images: Joi.array().items(Joi.string().uri()).default([]),
-	});
+		// Optional button: text and link go together
+		button_text: Joi.string().trim().max(60).allow('', null),
+		button_url: Joi.string()
+			.trim()
+			.uri({ scheme: ['http', 'https'] })
+			.allow('', null)
+			.messages({
+				'string.uri': 'Button link must be a full web address starting with https://',
+				'string.uriCustomScheme': 'Button link must be a full web address starting with https://',
+			}),
+	}).custom((value, helpers) =>
+		Boolean(value.button_text) === Boolean(value.button_url)
+			? value
+			: helpers.message('Button text and button link must both be filled in, or both left blank')
+	);
 
 	return newsSchema.validate(news);
 }

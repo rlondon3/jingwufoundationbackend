@@ -36,10 +36,7 @@ const buildEmail = (req, article, userId) => {
 	const unsubscribeUrl = userId
 		? `${apiUrl(req)}/newsletter/unsubscribe?u=${userId}&t=${unsubscribeToken(userId)}`
 		: `${apiUrl(req)}/newsletter/unsubscribe?test=1`;
-	const email = renderNewsletter(article, {
-		articleUrl: `${frontendUrl()}/app/news/${article.id}`,
-		unsubscribeUrl,
-	});
+	const email = renderNewsletter(article, { unsubscribeUrl });
 	email.headers = userId
 		? {
 				'List-Unsubscribe': `<${unsubscribeUrl}>`,

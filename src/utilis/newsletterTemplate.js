@@ -62,10 +62,11 @@ const formatDate = (d) =>
 	});
 
 /**
- * @param {object} article  news row (title, description, body, thumbnail_url, author_name, publish_at, tags)
- * @param {object} opts     { articleUrl, unsubscribeUrl }
+ * @param {object} article  news row (title, description, body, thumbnail_url, author_name,
+ *                          publish_at, tags, button_text, button_url)
+ * @param {object} opts     { unsubscribeUrl }
  */
-const renderNewsletter = (article, { articleUrl, unsubscribeUrl }) => {
+const renderNewsletter = (article, { unsubscribeUrl }) => {
 	const title = escapeHtml(article.title);
 	const description = escapeHtml(article.description);
 	const author = escapeHtml(article.author_name);
@@ -81,6 +82,19 @@ const renderNewsletter = (article, { articleUrl, unsubscribeUrl }) => {
 	const importantBadge = article.is_important
 		? `<span style="display:inline-block;margin-right:8px;padding:3px 10px;border-radius:12px;background:#fbeaea;color:#a12b2b;font-family:${SANS};font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;">Important</span>`
 		: '';
+
+	const hasButton = Boolean(article.button_text && article.button_url);
+	const button = hasButton
+		? `<tr><td align="center" style="padding:28px 40px 40px;">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+        <td style="border-radius:6px;background:${COLORS.button};">
+          <a href="${escapeHtml(article.button_url)}" style="display:inline-block;padding:13px 28px;font-family:${SANS};font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;">${escapeHtml(
+				article.button_text
+		  )}</a>
+        </td>
+      </tr></table>
+    </td></tr>`
+		: `<tr><td style="padding:0 0 32px;"></td></tr>`;
 
 	const tagRow = tags.length
 		? `<p style="margin:24px 0 0;font-family:${SANS};font-size:12px;color:${COLORS.muted};">${tags
@@ -122,13 +136,7 @@ const renderNewsletter = (article, { articleUrl, unsubscribeUrl }) => {
       <p style="margin:8px 0 0;font-family:${SANS};font-size:14px;color:${COLORS.muted};">&mdash; ${author}</p>
       ${tagRow}
     </td></tr>
-    <tr><td align="center" style="padding:28px 40px 40px;">
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
-        <td style="border-radius:6px;background:${COLORS.button};">
-          <a href="${escapeHtml(articleUrl)}" style="display:inline-block;padding:13px 28px;font-family:${SANS};font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;">Read on the student portal</a>
-        </td>
-      </tr></table>
-    </td></tr>
+    ${button}
   </table>
   <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px;">
     <tr><td align="center" style="padding:22px 24px;font-family:${SANS};font-size:12px;line-height:1.6;color:${COLORS.muted};">
@@ -155,8 +163,7 @@ const renderNewsletter = (article, { articleUrl, unsubscribeUrl }) => {
 		'',
 		`— ${article.author_name}`,
 		'',
-		`Read on the student portal: ${articleUrl}`,
-		'',
+		...(hasButton ? [`${article.button_text}: ${article.button_url}`, ''] : []),
 		'---',
 		"You're receiving this because you're a member of the Jing Wu Foundation community.",
 		`Unsubscribe: ${unsubscribeUrl}`,
