@@ -35,7 +35,7 @@ const isValidToken = (userId, token) => {
 const buildEmail = (req, article, userId) => {
 	const unsubscribeUrl = userId
 		? `${apiUrl(req)}/newsletter/unsubscribe?u=${userId}&t=${unsubscribeToken(userId)}`
-		: `${apiUrl(req)}/newsletter/unsubscribe`;
+		: `${apiUrl(req)}/newsletter/unsubscribe?test=1`;
 	const email = renderNewsletter(article, {
 		articleUrl: `${frontendUrl()}/app/news/${article.id}`,
 		unsubscribeUrl,
@@ -227,21 +227,35 @@ const sendToAll = async (req, res) => {
 // PUBLIC HANDLERS
 // ========================
 
-const unsubscribePage = (heading, message) => `<!DOCTYPE html>
+const unsubscribePage = (heading, message, action = '') => `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(heading)} · Jing Wu Foundation</title></head>
 <body style="margin:0;padding:48px 16px;background:#f2e9df;font-family:Georgia,serif;color:#261b10;text-align:center;">
 <div style="max-width:460px;margin:0 auto;background:#fff;border-radius:10px;padding:36px 28px;">
 <h1 style="font-weight:normal;font-size:26px;margin:0 0 12px;">${escapeHtml(heading)}</h1>
 <p style="font-size:16px;line-height:1.6;color:#3d3229;margin:0 0 20px;">${message}</p>
-<a href="${frontendUrl()}" style="color:#735231;">Return to jingwupai.org</a>
+${action}<a href="${frontendUrl()}" style="color:#735231;">Return to jingwupai.org</a>
 </div></body></html>`;
 
 /**
- * GET shows a confirmation; POST is the one-click unsubscribe mail clients use.
+ * GET only shows a confirm button, because link scanners (e.g. Outlook
+ * Safe Links) open every link in an email. POST unsubscribes; it serves
+ * both that button and the one-click unsubscribe mail clients use.
  * GET|POST /newsletter/unsubscribe?u=<userId>&t=<token>
  */
 const unsubscribe = async (req, res) => {
+	if (req.query.test) {
+		return res
+			.status(200)
+			.type('html')
+			.send(
+				unsubscribePage(
+					'This was a test email',
+					"In the real newsletter, this link lets each member unsubscribe. Nobody's subscription was changed."
+				)
+			);
+	}
+
 	const userId = parseInt(req.query.u);
 	if (!isValidToken(userId, req.query.t)) {
 		return res
@@ -254,6 +268,19 @@ const unsubscribe = async (req, res) => {
 				)
 			);
 	}
+	if (req.method === 'GET') {
+		return res
+			.status(200)
+			.type('html')
+			.send(
+				unsubscribePage(
+					'Unsubscribe from news emails?',
+					"You'll stop receiving news emails from the Jing Wu Foundation. Your account and courses are unaffected.",
+					`<form method="post" style="margin:0 0 20px;"><button type="submit" style="padding:12px 26px;border:0;border-radius:6px;background:#735231;color:#fff;font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;font-size:15px;font-weight:600;cursor:pointer;">Unsubscribe</button></form>`
+				)
+			);
+	}
+
 	try {
 		await req.app.locals.pool.query(
 			`UPDATE users SET newsletter_unsubscribed_at = COALESCE(newsletter_unsubscribed_at, CURRENT_TIMESTAMP)
