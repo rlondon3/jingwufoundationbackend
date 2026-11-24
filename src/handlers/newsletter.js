@@ -19,25 +19,38 @@ const frontendUrl = () => process.env.FRONTEND_URL || 'https://jingwupai.org';
 const apiUrl = (req) =>
 	process.env.API_PUBLIC_URL || `${req.protocol}://${req.get('host')}`;
 
-const unsubscribeToken = (userId) =>
+// Members are identified by user id; shop buyers (no account) by email
+const tokenSubject = (recipient) =>
+	recipient.id ? String(recipient.id) : `email:${recipient.email}`;
+
+const unsubscribeToken = (subject) =>
 	crypto
 		.createHmac('sha256', process.env.TOKEN_SECRET)
-		.update(`newsletter-unsubscribe:${userId}`)
+		.update(`newsletter-unsubscribe:${subject}`)
 		.digest('hex');
 
-const isValidToken = (userId, token) => {
-	if (!userId || typeof token !== 'string') return false;
-	const expected = Buffer.from(unsubscribeToken(userId));
+const isValidToken = (subject, token) => {
+	if (!subject || typeof token !== 'string') return false;
+	const expected = Buffer.from(unsubscribeToken(subject));
 	const given = Buffer.from(token);
 	return expected.length === given.length && crypto.timingSafeEqual(expected, given);
 };
 
-const buildEmail = (req, article, userId) => {
-	const unsubscribeUrl = userId
-		? `${apiUrl(req)}/newsletter/unsubscribe?u=${userId}&t=${unsubscribeToken(userId)}`
-		: `${apiUrl(req)}/newsletter/unsubscribe?test=1`;
-	const email = renderNewsletter(article, { unsubscribeUrl });
-	email.headers = userId
+const unsubscribeLink = (req, recipient) => {
+	if (!recipient) return `${apiUrl(req)}/newsletter/unsubscribe?test=1`;
+	const who = recipient.id ? `u=${recipient.id}` : `e=${encodeURIComponent(recipient.email)}`;
+	return `${apiUrl(req)}/newsletter/unsubscribe?${who}&t=${unsubscribeToken(tokenSubject(recipient))}`;
+};
+
+// recipient: { id, email } for a member, { id: null, email } for a shop
+// buyer, or null for a test send
+const buildEmail = (req, article, recipient) => {
+	const unsubscribeUrl = unsubscribeLink(req, recipient);
+	const email = renderNewsletter(article, {
+		unsubscribeUrl,
+		isMember: !recipient || Boolean(recipient.id),
+	});
+	email.headers = recipient
 		? {
 				'List-Unsubscribe': `<${unsubscribeUrl}>`,
 				'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
@@ -59,11 +72,22 @@ const withWorkingThumbnail = async (article) => {
 	return { ...article, thumbnail_url: null };
 };
 
+// Subscribed members, plus shop buyers who opted in at checkout and
+// aren't members (a member's own settings decide for them)
 const getRecipients = async (pool) => {
 	const res = await pool.query(
 		`SELECT id, email FROM users
 		 WHERE is_active = true AND newsletter_unsubscribed_at IS NULL
-		 ORDER BY id`
+		 UNION ALL
+		 SELECT NULL, b.email FROM (
+		   SELECT LOWER(buyer_email) AS email FROM stripe_orders
+		   WHERE newsletter_opt_in AND status = 'completed' AND buyer_email IS NOT NULL
+		   UNION
+		   SELECT LOWER(buyer_email) FROM paypal_orders
+		   WHERE newsletter_opt_in AND payment_status = 'COMPLETED' AND buyer_email IS NOT NULL
+		 ) b
+		 WHERE NOT EXISTS (SELECT 1 FROM users u WHERE LOWER(u.email) = b.email)
+		 ORDER BY id NULLS LAST, email`
 	);
 	return res.rows;
 };
@@ -84,7 +108,7 @@ const preview = async (req, res) => {
 			return res.status(404).json({ error: 'News article not found' });
 		}
 		const article = await withWorkingThumbnail(found);
-		const { html } = buildEmail(req, article, req.user.id);
+		const { html } = buildEmail(req, article, { id: req.user.id, email: req.user.email });
 		return res.status(200).type('html').send(html);
 	} catch (error) {
 		console.error('Newsletter preview error:', error);
@@ -101,6 +125,8 @@ const audience = async (req, res) => {
 		const recipients = await getRecipients(req.app.locals.pool);
 		return res.status(200).json({
 			count: recipients.length,
+			members: recipients.filter((r) => r.id).length,
+			buyers: recipients.filter((r) => !r.id).length,
 			email_configured: isConfigured(),
 		});
 	} catch (error) {
@@ -180,20 +206,20 @@ const sendToAll = async (req, res) => {
 		const recipients = await getRecipients(pool);
 
 		res.status(202).json({
-			message: `Sending to ${recipients.length} members`,
+			message: `Sending to ${recipients.length} subscribers`,
 			recipient_count: recipients.length,
 		});
 
 		let sent = 0;
 		const failures = [];
-		for (const user of recipients) {
+		for (const recipient of recipients) {
 			try {
-				const { subject, html, text, headers } = buildEmail(req, article, user.id);
-				await sendMail({ to: user.email, subject, html, text, headers });
+				const { subject, html, text, headers } = buildEmail(req, article, recipient);
+				await sendMail({ to: recipient.email, subject, html, text, headers });
 				sent++;
 			} catch (error) {
-				failures.push(user.email);
-				console.error(`Newsletter ${id} failed for ${user.email}:`, error.message);
+				failures.push(recipient.email);
+				console.error(`Newsletter ${id} failed for ${recipient.email}:`, error.message);
 			}
 			await new Promise((r) => setTimeout(r, SEND_DELAY_MS));
 		}
@@ -238,7 +264,8 @@ ${action}<a href="${frontendUrl()}" style="color:#735231;">Return to jingwupai.o
  * GET only shows a confirm button, because link scanners (e.g. Outlook
  * Safe Links) open every link in an email. POST unsubscribes; it serves
  * both that button and the one-click unsubscribe mail clients use.
- * GET|POST /newsletter/unsubscribe?u=<userId>&t=<token>
+ * GET|POST /newsletter/unsubscribe?u=<userId>&t=<token>   (members)
+ *          /newsletter/unsubscribe?e=<email>&t=<token>    (shop buyers)
  */
 const unsubscribe = async (req, res) => {
 	if (req.query.test) {
@@ -253,8 +280,10 @@ const unsubscribe = async (req, res) => {
 			);
 	}
 
-	const userId = parseInt(req.query.u);
-	if (!isValidToken(userId, req.query.t)) {
+	const userId = parseInt(req.query.u) || null;
+	const buyerEmail = !userId && typeof req.query.e === 'string' ? req.query.e.toLowerCase() : null;
+	const subject = userId ? String(userId) : buyerEmail && `email:${buyerEmail}`;
+	if (!isValidToken(subject, req.query.t)) {
 		return res
 			.status(400)
 			.type('html')
@@ -272,25 +301,40 @@ const unsubscribe = async (req, res) => {
 			.send(
 				unsubscribePage(
 					'Unsubscribe from news emails?',
-					"You'll stop receiving news emails from the Jing Wu Foundation. Your account and courses are unaffected.",
+					userId
+						? "You'll stop receiving news emails from the Jing Wu Foundation. Your account and courses are unaffected."
+						: "You'll stop receiving news emails from the Jing Wu Foundation.",
 					`<form method="post" style="margin:0 0 20px;"><button type="submit" style="padding:12px 26px;border:0;border-radius:6px;background:#735231;color:#fff;font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;font-size:15px;font-weight:600;cursor:pointer;">Unsubscribe</button></form>`
 				)
 			);
 	}
 
 	try {
-		await req.app.locals.pool.query(
-			`UPDATE users SET newsletter_unsubscribed_at = COALESCE(newsletter_unsubscribed_at, CURRENT_TIMESTAMP)
-			 WHERE id = $1`,
-			[userId]
-		);
+		const pool = req.app.locals.pool;
+		if (userId) {
+			await pool.query(
+				`UPDATE users SET newsletter_unsubscribed_at = COALESCE(newsletter_unsubscribed_at, CURRENT_TIMESTAMP)
+				 WHERE id = $1`,
+				[userId]
+			);
+		} else {
+			for (const table of ['stripe_orders', 'paypal_orders']) {
+				await pool.query(
+					`UPDATE ${table} SET newsletter_opt_in = false
+					 WHERE newsletter_opt_in AND LOWER(buyer_email) = $1`,
+					[buyerEmail]
+				);
+			}
+		}
 		return res
 			.status(200)
 			.type('html')
 			.send(
 				unsubscribePage(
 					"You've been unsubscribed",
-					'You will no longer receive news emails from the Jing Wu Foundation. Your account and courses are unaffected.'
+					userId
+						? 'You will no longer receive news emails from the Jing Wu Foundation. Your account and courses are unaffected.'
+						: 'You will no longer receive news emails from the Jing Wu Foundation.'
 				)
 			);
 	} catch (error) {

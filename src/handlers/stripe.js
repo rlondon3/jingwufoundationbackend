@@ -847,6 +847,7 @@ const createShopCheckout = async (req, res) => {
 			cancel_url,
 			mode = 'payment',
 			buyer_email,
+			newsletter_opt_in,
 		} = req.body;
 
 		if (!resource_id || !resource_price || !success_url || !cancel_url) {
@@ -916,6 +917,7 @@ const createShopCheckout = async (req, res) => {
 			status: 'pending',
 			resourceId: parseInt(resource_id),
 			buyerEmail: buyerEmail || null,
+			newsletterOptIn: Boolean(buyerEmail) && newsletter_opt_in === true,
 		});
 
 		return res.status(200).json({

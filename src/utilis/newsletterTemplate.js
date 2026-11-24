@@ -64,9 +64,12 @@ const formatDate = (d) =>
 /**
  * @param {object} article  news row (title, description, body, thumbnail_url, author_name,
  *                          publish_at, tags, button_text, button_url)
- * @param {object} opts     { unsubscribeUrl }
+ * @param {object} opts     { unsubscribeUrl, isMember } - isMember false for shop buyers
  */
-const renderNewsletter = (article, { unsubscribeUrl }) => {
+const renderNewsletter = (article, { unsubscribeUrl, isMember = true }) => {
+	const reason = isMember
+		? "You're receiving this because you're a member of the Jing Wu Foundation community."
+		: 'You\'re receiving this because you asked for news of new releases when you bought from our shop.';
 	const title = escapeHtml(article.title);
 	const description = escapeHtml(article.description);
 	const author = escapeHtml(article.author_name);
@@ -140,7 +143,7 @@ const renderNewsletter = (article, { unsubscribeUrl }) => {
   </table>
   <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px;">
     <tr><td align="center" style="padding:22px 24px;font-family:${SANS};font-size:12px;line-height:1.6;color:${COLORS.muted};">
-      You're receiving this because you're a member of the Jing Wu Foundation community.<br>
+      ${escapeHtml(reason)}<br>
       <a href="${escapeHtml(unsubscribeUrl)}" style="color:${COLORS.muted};text-decoration:underline;">Unsubscribe from news emails</a>
       &nbsp;&middot;&nbsp;
       <a href="https://jingwupai.org" style="color:${COLORS.muted};text-decoration:underline;">jingwupai.org</a>
@@ -165,7 +168,7 @@ const renderNewsletter = (article, { unsubscribeUrl }) => {
 		'',
 		...(hasButton ? [`${article.button_text}: ${article.button_url}`, ''] : []),
 		'---',
-		"You're receiving this because you're a member of the Jing Wu Foundation community.",
+		reason,
 		`Unsubscribe: ${unsubscribeUrl}`,
 	].join('\n');
 

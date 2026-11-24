@@ -169,15 +169,16 @@ class PayPalOrderStore {
 				status = 'completed',
 				resourceId = null,
 				buyerEmail = null,
+				newsletterOptIn = false,
 			} = orderData;
 
 			const query = `
         INSERT INTO paypal_orders (
           paypal_order_id, payer_id, amount_value, amount_currency,
           payment_status, capture_id, status, resource_id, buyer_email,
-          created_at, updated_at
+          newsletter_opt_in, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
         RETURNING *
       `;
 
@@ -192,6 +193,7 @@ class PayPalOrderStore {
 				status,
 				resourceId,
 				buyerEmail,
+				newsletterOptIn,
 			]);
 			client.release();
 			return result.rows[0];

@@ -846,7 +846,7 @@ const createCheckout = async (req, res) => {
  */
 const createShopCheckout = async (req, res) => {
 	try {
-		const { resource_id, resource_price, buyer_email } = req.body;
+		const { resource_id, resource_price, buyer_email, newsletter_opt_in } = req.body;
 
 		if (!resource_id || !resource_price) {
 			return res.status(400).json({ error: 'Missing required parameters' });
@@ -920,6 +920,7 @@ const createShopCheckout = async (req, res) => {
 			status: 'pending',
 			resourceId: parseInt(resource_id),
 			buyerEmail: buyerEmail || null,
+			newsletterOptIn: Boolean(buyerEmail) && newsletter_opt_in === true,
 		});
 
 		// Find approval URL
