@@ -40,8 +40,9 @@ const getClient = () => {
 
 /**
  * Send one email. `headers` lets callers add List-Unsubscribe etc.
+ * `attachments` is a list of { filename, content (Buffer), contentType }.
  */
-const sendMail = async ({ to, subject, html, text, headers }) => {
+const sendMail = async ({ to, subject, html, text, headers, attachments }) => {
 	return getClient().send(
 		new SendEmailCommand({
 			FromEmailAddress: process.env.MAIL_FROM,
@@ -58,6 +59,14 @@ const sendMail = async ({ to, subject, html, text, headers }) => {
 						Name,
 						Value,
 					})),
+					...(attachments?.length && {
+						Attachments: attachments.map((a) => ({
+							FileName: a.filename,
+							RawContent: a.content,
+							ContentType: a.contentType,
+							ContentDisposition: 'ATTACHMENT',
+						})),
+					}),
 				},
 			},
 		})

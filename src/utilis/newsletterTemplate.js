@@ -172,4 +172,4 @@ const renderNewsletter = (article, { unsubscribeUrl }) => {
 	return { subject: article.title, html, text };
 };
 
-module.exports = { renderNewsletter, escapeHtml };
+module.exports = { renderNewsletter, escapeHtml, COLORS, FONT, SANS, LOGO_URL };

@@ -10,7 +10,8 @@ const {
 	authenticationToken,
 	authenticateUserId,
 } = require('../middleware/auth');
-const puppeteer = require('puppeteer');
+const { generateResourcePdf, pdfFileName } = require('../utilis/resourcePdf');
+const { deliverShopPurchase, emailSchema } = require('./shopPurchases');
 
 const { OrderStore } = require('../models/order');
 const { MessageStore } = require('../models/message');
@@ -845,10 +846,19 @@ const createShopCheckout = async (req, res) => {
 			success_url,
 			cancel_url,
 			mode = 'payment',
+			buyer_email,
 		} = req.body;
 
 		if (!resource_id || !resource_price || !success_url || !cancel_url) {
 			return res.status(400).json({ error: 'Missing required parameters' });
+		}
+
+		// Where we email their copy (optional for older clients)
+		const { value: buyerEmail, error: emailError } = emailSchema
+			.allow('', null)
+			.validate(buyer_email);
+		if (emailError) {
+			return res.status(400).json({ error: 'Enter a valid email address' });
 		}
 
 		// Create dynamic price for the resource
@@ -866,6 +876,7 @@ const createShopCheckout = async (req, res) => {
 
 		// Create temporary customer for shop purchase
 		const customer = await stripe.customers.create({
+			...(buyerEmail && { email: buyerEmail }),
 			metadata: {
 				is_shop_customer: 'true',
 				resource_id: resource_id.toString(),
@@ -903,6 +914,8 @@ const createShopCheckout = async (req, res) => {
 			currency: 'usd',
 			paymentStatus: 'pending',
 			status: 'pending',
+			resourceId: parseInt(resource_id),
+			buyerEmail: buyerEmail || null,
 		});
 
 		return res.status(200).json({
@@ -1337,109 +1350,6 @@ const createReunionCheckout = async (req, res) => {
 };
 
 /**
- * Handle large file downloads with extended timeouts
- * Used for HTML content > 10MB
- */
-const handleLargeFileDownload = async (resource, res) => {
-	console.log(`Processing large file download for: ${resource.title} (${(resource.content?.length / 1024 / 1024).toFixed(2)}MB)`);
-
-	try {
-		const browser = await puppeteer.launch({
-			headless: true,
-			args: [
-				'--no-sandbox',
-				'--disable-setuid-sandbox',
-				'--disable-dev-shm-usage',
-				'--disable-accelerated-2d-canvas',
-				'--no-first-run',
-				'--no-zygote',
-				'--single-process',
-				'--disable-gpu',
-			],
-		});
-
-		try {
-			const page = await browser.newPage();
-
-			// Extended timeouts for large files (5 minutes)
-			page.setDefaultNavigationTimeout(300000); // 5 minutes
-			page.setDefaultTimeout(300000); // 5 minutes
-
-			// Create properly formatted HTML content
-			const content =
-				resource.type === 'manual'
-					? resource.content
-					: resource.content?.replace(/\n/g, '<br>');
-			const htmlContent = `
-				<!DOCTYPE html>
-				<html>
-				<head>
-					<meta charset="utf-8">
-					<title>${resource.title}</title>
-				</head>
-				<body>
-					${content || 'No content available'}
-				</body>
-				</html>
-			`;
-
-			console.log('Setting content for large file (this may take a while)...');
-
-			// Use 'domcontentloaded' instead of 'networkidle0' for faster processing
-			await page.setContent(htmlContent, {
-				waitUntil: 'domcontentloaded',
-				timeout: 300000, // 5 minute timeout
-			});
-
-			console.log('Generating PDF for large file...');
-
-			// Generate PDF with extended timeout
-			const pdfBuffer = await page.pdf({
-				format: 'A4',
-				printBackground: true,
-				margin: {
-					top: '0mm',
-					right: '0mm',
-					bottom: '0mm',
-					left: '0mm',
-				},
-				timeout: 300000, // 5 minute timeout for PDF generation
-			});
-
-			await browser.close();
-
-			console.log(`Large file PDF generated successfully: ${(pdfBuffer.length / 1024 / 1024).toFixed(2)}MB`);
-
-			// Set proper headers for PDF download
-			res.setHeader('Content-Type', 'application/pdf');
-			res.setHeader(
-				'Content-Disposition',
-				`attachment; filename="${resource.title.replace(
-					/[^a-zA-Z0-9]/g,
-					'-'
-				)}.pdf"`
-			);
-			res.setHeader('Content-Length', pdfBuffer.length);
-
-			return res.send(pdfBuffer);
-		} catch (error) {
-			await browser.close();
-			throw error;
-		}
-	} catch (error) {
-		console.error('Large file download error:', error);
-
-		// Return a more helpful error with retry information
-		return res.status(500).json({
-			error: 'File is too large to process at this time',
-			message: 'Please try again in a few moments. If the problem persists, contact support.',
-			isLargeFile: true,
-			fileSize: resource.content?.length,
-		});
-	}
-};
-
-/**
  * Public resource download after shop purchase
  * GET /stripe/shop-download/:sessionId
  */
@@ -1479,89 +1389,16 @@ const shopDownload = async (req, res) => {
 			return res.status(404).json({ error: 'Resource not found' });
 		}
 
-		// Check content size - if > 10MB, use special large file handler
-		const contentSize = resource.content?.length || 0;
-		const sizeMB = contentSize / 1024 / 1024;
+		const pdfBuffer = await generateResourcePdf(resource);
 
-		if (contentSize > 10000000) { // 10MB threshold
-			console.log(`Large file detected (${sizeMB.toFixed(2)}MB) - using extended timeout handler`);
-			return handleLargeFileDownload(resource, res);
-		}
+		res.setHeader('Content-Type', 'application/pdf');
+		res.setHeader(
+			'Content-Disposition',
+			`attachment; filename="${pdfFileName(resource)}"`
+		);
+		res.setHeader('Content-Length', pdfBuffer.length);
 
-		// Normal file processing for files < 10MB
-		console.log(`Processing standard file (${sizeMB.toFixed(2)}MB)`);
-
-		// Generate PDF using puppeteer for proper HTML rendering
-		const browser = await puppeteer.launch({
-			headless: true,
-			args: [
-				'--no-sandbox',
-				'--disable-setuid-sandbox',
-				'--disable-dev-shm-usage',
-				'--disable-accelerated-2d-canvas',
-				'--no-first-run',
-				'--no-zygote',
-				'--single-process',
-				'--disable-gpu',
-			],
-		});
-
-		try {
-			const page = await browser.newPage();
-
-			// Create properly formatted HTML content
-			const content =
-				resource.type === 'manual'
-					? resource.content
-					: resource.content?.replace(/\n/g, '<br>');
-			const htmlContent = `
-				<!DOCTYPE html>
-				<html>
-				<head>
-					<meta charset="utf-8">
-					<title>${resource.title}</title>
-				</head>
-				<body>
-					${content || 'No content available'}
-				</body>
-				</html>
-			`;
-
-			// Set the HTML content
-			await page.setContent(htmlContent, {
-				waitUntil: 'networkidle0',
-			});
-
-			// Generate PDF with no additional margins or styling
-			const pdfBuffer = await page.pdf({
-				format: 'A4',
-				printBackground: true,
-				margin: {
-					top: '0mm',
-					right: '0mm',
-					bottom: '0mm',
-					left: '0mm',
-				},
-			});
-
-			await browser.close();
-
-			// Set proper headers for PDF download
-			res.setHeader('Content-Type', 'application/pdf');
-			res.setHeader(
-				'Content-Disposition',
-				`attachment; filename="${resource.title.replace(
-					/[^a-zA-Z0-9]/g,
-					'-'
-				)}.pdf"`
-			);
-			res.setHeader('Content-Length', pdfBuffer.length);
-
-			return res.send(pdfBuffer);
-		} catch (error) {
-			await browser.close();
-			throw error;
-		}
+		return res.send(pdfBuffer);
 	} catch (error) {
 		console.error('Shop download error:', error);
 		res.status(500).json({ error: 'Failed to process download' });
@@ -1878,6 +1715,13 @@ async function handleStripeEvent(event, pool) {
 						'Failed to update shop purchase payment status:',
 						error
 					);
+				}
+
+				// Email their PDF copy
+				try {
+					await deliverShopPurchase(pool, 'stripe', checkout_session_id);
+				} catch (error) {
+					console.error('Failed to start shop purchase email:', error);
 				}
 			} else if (metadata?.is_class_purchase === 'true') {
 				// Handle class fee payment - mark the pre-created order paid, then

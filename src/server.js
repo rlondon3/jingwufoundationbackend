@@ -13,6 +13,7 @@ const messagesRoute = require('./handlers/messages');
 const messageEventsRoute = require('./handlers/messageEvents');
 const news_route = require('./handlers/news');
 const newsletter_route = require('./handlers/newsletter');
+const shop_purchases_route = require('./handlers/shopPurchases');
 const resources_route = require('./handlers/resources');
 const ai_sifu_route = require('./handlers/aiSifu');
 const ai_conversations_route = require('./handlers/aiSIfuHistories');
@@ -31,8 +32,6 @@ const subscriptions_route = require('./handlers/subscriptions');
 const coursePreviews_route = require('./handlers/coursePreviews');
 const backup_routes = require('./handlers/backupRoutes');
 const { coupon_route } = require('./handlers/coupons');
-const { checkAndProcessContent } = require('../scripts/processContentChunks');
-const { checkAndImportPDFs } = require('../scripts/addPDFResources');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -163,6 +162,7 @@ messagesRoute(app);
 messageEventsRoute(app);
 news_route(app);
 newsletter_route(app);
+shop_purchases_route(app);
 resources_route(app);
 reviews_route(app);
 ai_sifu_route(app);
@@ -226,16 +226,6 @@ const server = app.listen(PORT, async function () {
 	console.log(`🚀 Starting app using the server on ${address}`);
 	console.log(`📋 Environment: ${process.env.NODE_ENV || 'development'}`);
 	await testConnection();
-
-	// Auto-import PDF files and process content chunks on startup
-	console.log('🔄 Starting PDF import and content processing...');
-
-	// Step 1: Import any new PDF files from assets/resources
-	await checkAndImportPDFs();
-
-	// Step 2: Process content chunks (includes new PDFs)
-	await checkAndProcessContent();
-	console.log('✅ PDF import and content processing completed');
 });
 
 module.exports = app;

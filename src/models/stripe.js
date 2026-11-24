@@ -174,15 +174,17 @@ class StripeOrderStore {
 				currency,
 				paymentStatus,
 				status = 'completed',
+				resourceId = null,
+				buyerEmail = null,
 			} = orderData;
 
 			const query = `
         INSERT INTO stripe_orders (
           checkout_session_id, payment_intent_id, customer_id,
           amount_subtotal, amount_total, currency, payment_status,
-          status, created_at, updated_at
+          status, resource_id, buyer_email, created_at, updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
         RETURNING *
       `;
 
@@ -196,6 +198,8 @@ class StripeOrderStore {
 				currency,
 				paymentStatus,
 				status,
+				resourceId,
+				buyerEmail,
 			]);
 			client.release();
 			return result.rows[0];
