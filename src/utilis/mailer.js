@@ -65,6 +65,8 @@ const sendMail = async ({ to, subject, html, text, headers, attachments }) => {
 							RawContent: a.content,
 							ContentType: a.contentType,
 							ContentDisposition: 'ATTACHMENT',
+							// Binary files (PDFs) are corrupted by SES's text encodings
+							ContentTransferEncoding: 'BASE64',
 						})),
 					}),
 				},
