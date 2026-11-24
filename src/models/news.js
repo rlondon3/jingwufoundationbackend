@@ -195,8 +195,8 @@ GROUP BY n.id
 					throw new Error('News article not found');
 				}
 
-				// Update tags
-				if (newsData.tags !== undefined) {
+				// Update tags (null from an article with no tags means leave as is)
+				if (Array.isArray(newsData.tags)) {
 					await client.query('DELETE FROM news_tags WHERE news_id = $1', [id]);
 					if (newsData.tags.length > 0) {
 						await this.addTags(client, id, newsData.tags);
@@ -204,7 +204,7 @@ GROUP BY n.id
 				}
 
 				// Update body images
-				if (newsData.body_images !== undefined) {
+				if (Array.isArray(newsData.body_images)) {
 					await client.query('DELETE FROM news_images WHERE news_id = $1', [
 						id,
 					]);
